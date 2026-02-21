@@ -17,7 +17,6 @@ namespace MultiSkyLineII
         public MultiplayerContractResource Resource;
         public int UnitsPerTick;
         public int PricePerUnit;
-        public int DurationSeconds;
         public DateTime CreatedUtc;
     }
 
@@ -29,7 +28,6 @@ namespace MultiSkyLineII
         public MultiplayerContractResource Resource;
         public int UnitsPerTick;
         public int PricePerUnit;
-        public int DurationSeconds;
         public DateTime CreatedUtc;
     }
 }

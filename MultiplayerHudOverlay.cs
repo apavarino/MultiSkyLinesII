@@ -25,18 +25,19 @@ namespace MultiSkyLineII
         private bool _stylesReady;
         private int _proposalTargetIndex;
         private MultiplayerContractResource _proposalResource = MultiplayerContractResource.Electricity;
-        private float _proposalUnits = 120f;
+        private float _proposalUnits = 5000f;
         private float _proposalPrice = 3f;
-        private float _proposalDuration = 180f;
         private string _proposalFeedback;
         private DateTime _proposalFeedbackUntilUtc;
         private string _windowTitle = "MultiSkyLineII Multiplayer";
         private int _activeTab;
         private Vector2 _debugScrollPosition;
+        private DateTime _nextLocalStateCaptureUtc;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
             _networkService = networkService;
+            _networkService.CaptureLocalStateOnMainThread();
             var shortVersion = Mod.DisplayVersion;
             if (!string.IsNullOrWhiteSpace(shortVersion))
             {
@@ -46,6 +47,12 @@ namespace MultiSkyLineII
 
         private void Update()
         {
+            if (_networkService != null && DateTime.UtcNow >= _nextLocalStateCaptureUtc)
+            {
+                _networkService.CaptureLocalStateOnMainThread();
+                _nextLocalStateCaptureUtc = DateTime.UtcNow.AddMilliseconds(400);
+            }
+
             var inGameplay = IsInGameplay();
             if (!inGameplay)
             {
@@ -168,7 +175,7 @@ namespace MultiSkyLineII
             var statesHeight = Mathf.Max(112f, states.Count * 112f);
             var contractsHeight = Mathf.Max(84f, activeContracts.Count * 22f + 34f);
             var pendingHeight = Mathf.Max(84f, pendingProposals.Count * 26f + 34f);
-            var proposalHeight = 158f;
+            var proposalHeight = 132f;
             var contentHeight = Mathf.Max(viewHeight, statesHeight + contractsHeight + pendingHeight + proposalHeight + 28f);
             var viewRect = new Rect(16f, contentTop, viewWidth, viewHeight);
             var contentRect = new Rect(0f, 0f, viewWidth - 20f, contentHeight);
@@ -239,9 +246,19 @@ namespace MultiSkyLineII
             for (var i = 0; i < contracts.Count; i++)
             {
                 var c = contracts[i];
-                var secondsLeft = Mathf.Max(0, (int)(c.CreatedUtc.AddSeconds(c.DurationSeconds) - DateTime.UtcNow).TotalSeconds);
                 var resource = GetResourceLabel(c.Resource);
-                GUI.Label(new Rect(12f, lineY, width - 24f, 18f), $"{c.SellerPlayer} -> {c.BuyerPlayer} | {resource} {c.UnitsPerTick}/tick | ${c.PricePerUnit}/u | {secondsLeft}s", _smallStyle);
+                GUI.Label(new Rect(12f, lineY, width - 120f, 18f), $"{c.SellerPlayer} -> {c.BuyerPlayer} | {resource} {FormatUnitValue(c.UnitsPerTick)} u/tick | ${c.PricePerUnit}/u", _smallStyle);
+                var local = _networkService.GetLocalState().Name;
+                if (string.Equals(c.SellerPlayer, local, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(c.BuyerPlayer, local, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (GUI.Button(new Rect(width - 100f, lineY, 84f, 20f), "Annuler"))
+                    {
+                        var ok = _networkService.TryCancelContract(c.Id, out var error);
+                        _proposalFeedback = ok ? "Contrat annule." : $"Erreur: {error}";
+                        _proposalFeedbackUntilUtc = DateTime.UtcNow.AddSeconds(3);
+                    }
+                }
                 lineY += 20f;
             }
         }
@@ -258,7 +275,7 @@ namespace MultiSkyLineII
                 }
             }
 
-            GUI.Box(new Rect(4f, y, width - 8f, 152f), GUIContent.none, _cardStyle);
+            GUI.Box(new Rect(4f, y, width - 8f, 126f), GUIContent.none, _cardStyle);
             GUI.Label(new Rect(12f, y + 8f, width - 24f, 18f), "Proposer un contrat", _nameStyle);
             if (targetNames.Count == 0)
             {
@@ -280,16 +297,14 @@ namespace MultiSkyLineII
                 _proposalResource = (MultiplayerContractResource)(((int)_proposalResource + 1) % 3);
             }
 
-            GUI.Label(new Rect(12f, y + 58f, 150f, 16f), $"Quantite/tick: {(int)_proposalUnits}", _smallStyle);
-            _proposalUnits = GUI.HorizontalSlider(new Rect(125f, y + 62f, 220f, 14f), _proposalUnits, 10f, 1000f);
+            GUI.Label(new Rect(12f, y + 58f, 220f, 16f), $"Quantite/tick: {FormatUnitValue(Mathf.RoundToInt(_proposalUnits))} u", _smallStyle);
+            _proposalUnits = GUI.HorizontalSlider(new Rect(125f, y + 62f, 220f, 14f), _proposalUnits, 10f, 100000f);
 
             GUI.Label(new Rect(12f, y + 80f, 150f, 16f), $"Prix/unite: ${(int)_proposalPrice}", _smallStyle);
             _proposalPrice = GUI.HorizontalSlider(new Rect(125f, y + 84f, 220f, 14f), _proposalPrice, 1f, 50f);
 
-            GUI.Label(new Rect(12f, y + 102f, 150f, 16f), $"Duree: {(int)_proposalDuration}s", _smallStyle);
-            _proposalDuration = GUI.HorizontalSlider(new Rect(125f, y + 106f, 220f, 14f), _proposalDuration, 30f, 600f);
-
-            if (GUI.Button(new Rect(width - 156f, y + 122f, 140f, 22f), "Envoyer contrat"))
+            GUI.Label(new Rect(12f, y + 102f, width - 220f, 16f), "Contrat indefini (annulation manuelle).", _smallStyle);
+            if (GUI.Button(new Rect(width - 156f, y + 98f, 140f, 22f), "Envoyer contrat"))
             {
                 var ok = _networkService.TryProposeContract(
                     sellerPlayer: selectedTarget,
@@ -297,7 +312,6 @@ namespace MultiSkyLineII
                     resource: _proposalResource,
                     unitsPerTick: Mathf.RoundToInt(_proposalUnits),
                     pricePerUnit: Mathf.RoundToInt(_proposalPrice),
-                    durationSeconds: Mathf.RoundToInt(_proposalDuration),
                     out var error);
 
                 _proposalFeedback = ok ? "Demande envoyee." : $"Erreur: {error}";
@@ -327,7 +341,7 @@ namespace MultiSkyLineII
                 var p = proposals[i];
                 var resource = GetResourceLabel(p.Resource);
                 var expiresIn = Mathf.Max(0, 120 - (int)(DateTime.UtcNow - p.CreatedUtc).TotalSeconds);
-                GUI.Label(new Rect(12f, lineY, width - 200f, 18f), $"{p.BuyerPlayer} demande {resource} {p.UnitsPerTick}/tick a {p.SellerPlayer} | ${p.PricePerUnit}/u | {expiresIn}s", _smallStyle);
+                GUI.Label(new Rect(12f, lineY, width - 200f, 18f), $"{p.BuyerPlayer} demande {resource} {FormatUnitValue(p.UnitsPerTick)} u/tick a {p.SellerPlayer} | ${p.PricePerUnit}/u | {expiresIn}s", _smallStyle);
 
                 if (string.Equals(p.SellerPlayer, local.Name, StringComparison.OrdinalIgnoreCase))
                 {
@@ -390,7 +404,19 @@ namespace MultiSkyLineII
             GUI.Label(new Rect(left, y - 2f, 84f, 16f), label, _smallStyle);
             GUI.DrawTexture(new Rect(meterX, y, meterWidth, meterHeight), _meterBg);
             GUI.DrawTexture(new Rect(meterX, y, meterWidth * ratio, meterHeight), _meterFill);
-            GUI.Label(new Rect(meterX + meterWidth + 8f, y - 2f, 100f, 16f), $"{fulfilled}/{demand} ({auxLabel} {aux})", _smallStyle);
+            GUI.Label(new Rect(meterX + meterWidth + 8f, y - 2f, 180f, 16f), $"{FormatUnitValue(fulfilled)}/{FormatUnitValue(demand)} u ({auxLabel} {FormatUnitValue(aux)} u)", _smallStyle);
+        }
+
+        private static string FormatUnitValue(int value)
+        {
+            var abs = Math.Abs((long)value);
+            if (abs >= 1_000_000_000L)
+                return $"{value / 1_000_000_000f:0.##}G";
+            if (abs >= 1_000_000L)
+                return $"{value / 1_000_000f:0.##}M";
+            if (abs >= 1_000L)
+                return $"{value / 1_000f:0.##}k";
+            return value.ToString();
         }
 
         private void OnDestroy()

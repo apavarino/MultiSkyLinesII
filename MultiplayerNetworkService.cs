@@ -31,6 +31,8 @@ namespace MultiSkyLineII
         private readonly ConcurrentQueue<string> _outboundMessages = new ConcurrentQueue<string>();
         private readonly List<string> _debugLog = new List<string>();
         private MultiplayerResourceState? _authoritativeLocalState;
+        private MultiplayerResourceState _latestMainThreadLocalState;
+        private bool _hasMainThreadLocalState;
         private DateTime _nextSettlementUtc = DateTime.UtcNow;
         private const int ProposalTimeoutSeconds = 120;
         private string _configuredBindAddress = "0.0.0.0";
@@ -205,6 +207,7 @@ namespace MultiSkyLineII
                 _moneyAdjustments.Clear();
                 _resourceAdjustments.Clear();
                 _authoritativeLocalState = null;
+                _hasMainThreadLocalState = false;
                 while (_outboundMessages.TryDequeue(out _)) { }
                 IsHost = false;
                 AddDebugLog("Network stopped.");
@@ -315,7 +318,7 @@ namespace MultiSkyLineII
                 using (var reader = new StreamReader(stream, Encoding.UTF8, false, 1024, true))
                 using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true) { AutoFlush = true })
                 {
-                    await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                    await writer.WriteLineAsync(SerializeState(GetLocalState())).ConfigureAwait(false);
                     AddDebugLog("TX STATE (initial)");
                     Task<string> pendingReadTask = null;
                     var nextSyncUtc = DateTime.UtcNow;
@@ -370,7 +373,7 @@ namespace MultiSkyLineII
                                 lock (_sync)
                                 {
                                     _remoteStates.Clear();
-                                    var localPlayerName = NormalizePlayerName(_localStateProvider().Name);
+                                    var localPlayerName = NormalizePlayerName(GetLocalState().Name);
                                     MultiplayerResourceState? authoritative = null;
                                     foreach (var state in snapshotStates)
                                     {
@@ -417,20 +420,19 @@ namespace MultiSkyLineII
                                     if (TryGetStateByPlayer(proposal.SellerPlayer, out var sellerState) &&
                                         TryGetStateByPlayer(proposal.BuyerPlayer, out _))
                                     {
-                                        _pendingProposals.Add(new MultiplayerContractProposal
-                                        {
-                                            Id = Guid.NewGuid().ToString("N"),
-                                            SellerPlayer = sellerState.Name,
-                                            BuyerPlayer = proposal.BuyerPlayer,
-                                            Resource = proposal.Resource,
-                                            UnitsPerTick = proposal.UnitsPerTick,
-                                            PricePerUnit = proposal.PricePerUnit,
-                                            DurationSeconds = proposal.DurationSeconds,
-                                            CreatedUtc = DateTime.UtcNow
-                                        });
-                                    }
+                                    _pendingProposals.Add(new MultiplayerContractProposal
+                                    {
+                                        Id = Guid.NewGuid().ToString("N"),
+                                        SellerPlayer = sellerState.Name,
+                                        BuyerPlayer = proposal.BuyerPlayer,
+                                        Resource = proposal.Resource,
+                                        UnitsPerTick = proposal.UnitsPerTick,
+                                        PricePerUnit = proposal.PricePerUnit,
+                                        CreatedUtc = DateTime.UtcNow
+                                    });
                                 }
                             }
+                        }
                             else if (IsHost && TryParseContractDecision(line, out var decision))
                             {
                                 AddDebugLog($"RX CONTRACTDECISION id={decision.ProposalId} actor={decision.ActorCity} accept={decision.Accept}");
@@ -439,6 +441,17 @@ namespace MultiSkyLineII
                                     if (!TryApplyProposalDecision(decision.ProposalId, decision.ActorCity, decision.Accept, out var decisionError))
                                     {
                                         _log.Warn($"Contract decision ignored: {decisionError}");
+                                    }
+                                }
+                            }
+                            else if (IsHost && TryParseContractCancel(line, out var cancel))
+                            {
+                                AddDebugLog($"RX CONTRACTCANCEL id={cancel.ContractId} actor={cancel.ActorPlayer}");
+                                lock (_sync)
+                                {
+                                    if (!TryCancelContractInternal(cancel.ContractId, cancel.ActorPlayer, out var cancelError))
+                                    {
+                                        AddDebugLog($"Contract cancel ignored: {cancelError}");
                                     }
                                 }
                             }
@@ -463,7 +476,7 @@ namespace MultiSkyLineII
                             }
                             else
                             {
-                                await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                                await writer.WriteLineAsync(SerializeState(GetLocalState())).ConfigureAwait(false);
                                 AddDebugLog("TX STATE (periodic)");
                             }
 
@@ -546,7 +559,22 @@ namespace MultiSkyLineII
 
         public MultiplayerResourceState GetLocalState()
         {
+            lock (_sync)
+            {
+                if (_hasMainThreadLocalState)
+                    return _latestMainThreadLocalState;
+            }
             return _localStateProvider();
+        }
+
+        public void CaptureLocalStateOnMainThread()
+        {
+            var state = _localStateProvider();
+            lock (_sync)
+            {
+                _latestMainThreadLocalState = state;
+                _hasMainThreadLocalState = true;
+            }
         }
 
         public IReadOnlyList<MultiplayerContract> GetActiveContracts()
@@ -554,7 +582,6 @@ namespace MultiSkyLineII
             lock (_sync)
             {
                 return _contracts
-                    .Where(c => !IsExpired(c, DateTime.UtcNow))
                     .OrderBy(c => c.CreatedUtc)
                     .ToList();
             }
@@ -580,7 +607,7 @@ namespace MultiSkyLineII
                 return false;
             }
 
-            var actorCity = _localStateProvider().Name;
+            var actorCity = GetLocalState().Name;
             if (IsHost)
             {
                 lock (_sync)
@@ -595,7 +622,7 @@ namespace MultiSkyLineII
             return true;
         }
 
-        public bool TryProposeContract(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit, int durationSeconds, out string error)
+        public bool TryProposeContract(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit, out string error)
         {
             error = null;
             if (string.IsNullOrWhiteSpace(sellerPlayer) || string.IsNullOrWhiteSpace(buyerPlayer))
@@ -613,7 +640,7 @@ namespace MultiSkyLineII
                 return false;
             }
 
-            if (unitsPerTick <= 0 || pricePerUnit <= 0 || durationSeconds <= 0)
+            if (unitsPerTick <= 0 || pricePerUnit <= 0)
             {
                 error = "Parametres de contrat invalides.";
                 return false;
@@ -644,7 +671,6 @@ namespace MultiSkyLineII
                         Resource = resource,
                         UnitsPerTick = unitsPerTick,
                         PricePerUnit = pricePerUnit,
-                        DurationSeconds = durationSeconds,
                         CreatedUtc = now
                     };
                     _pendingProposals.Add(proposal);
@@ -654,9 +680,32 @@ namespace MultiSkyLineII
                 return true;
             }
 
-            var request = SerializeContractRequest(sellerPlayer, buyerPlayer, resource, unitsPerTick, pricePerUnit, durationSeconds);
+            var request = SerializeContractRequest(sellerPlayer, buyerPlayer, resource, unitsPerTick, pricePerUnit);
             _outboundMessages.Enqueue(request);
             AddDebugLog($"Queued CONTRACTREQ seller={sellerPlayer} buyer={buyerPlayer} units={unitsPerTick}");
+            return true;
+        }
+
+        public bool TryCancelContract(string contractId, out string error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(contractId))
+            {
+                error = "Contrat invalide.";
+                return false;
+            }
+
+            var actor = GetLocalState().Name;
+            if (IsHost)
+            {
+                lock (_sync)
+                {
+                    return TryCancelContractInternal(contractId, actor, out error);
+                }
+            }
+
+            _outboundMessages.Enqueue(SerializeContractCancel(contractId, actor));
+            AddDebugLog($"Queued CONTRACTCANCEL id={contractId} actor={actor}");
             return true;
         }
 
@@ -670,8 +719,8 @@ namespace MultiSkyLineII
                 }
 
                 var local = IsHost
-                    ? ApplyAdjustments(_localStateProvider())
-                    : (_authoritativeLocalState ?? _localStateProvider());
+                    ? ApplyAdjustments(GetLocalState())
+                    : (_authoritativeLocalState ?? GetLocalState());
                 local.Name = NormalizePlayerName(local.Name);
 
                 var result = new List<MultiplayerResourceState> { local };
@@ -801,8 +850,6 @@ namespace MultiSkyLineII
 
         private string SerializeContracts()
         {
-            var now = DateTime.UtcNow;
-            _contracts.RemoveAll(c => IsExpired(c, now));
             if (_contracts.Count == 0)
                 return "CONTRACTS";
 
@@ -819,7 +866,6 @@ namespace MultiSkyLineII
                 (int)c.Resource,
                 c.UnitsPerTick,
                 c.PricePerUnit,
-                c.DurationSeconds,
                 c.CreatedUtc.Ticks);
         }
 
@@ -837,14 +883,13 @@ namespace MultiSkyLineII
             for (var i = 1; i < parts.Length; i++)
             {
                 var fields = parts[i].Split(',');
-                if (fields.Length != 8)
+                if (fields.Length != 7)
                     continue;
 
                 if (!int.TryParse(fields[3], out var resourceId) ||
                     !int.TryParse(fields[4], out var unitsPerTick) ||
                     !int.TryParse(fields[5], out var pricePerUnit) ||
-                    !int.TryParse(fields[6], out var durationSeconds) ||
-                    !long.TryParse(fields[7], out var createdTicks))
+                    !long.TryParse(fields[6], out var createdTicks))
                     continue;
 
                 parsed.Add(new MultiplayerContract
@@ -857,7 +902,6 @@ namespace MultiSkyLineII
                         : MultiplayerContractResource.Electricity,
                     UnitsPerTick = unitsPerTick,
                     PricePerUnit = pricePerUnit,
-                    DurationSeconds = durationSeconds,
                     CreatedUtc = new DateTime(createdTicks, DateTimeKind.Utc)
                 });
             }
@@ -886,7 +930,6 @@ namespace MultiSkyLineII
                 (int)p.Resource,
                 p.UnitsPerTick,
                 p.PricePerUnit,
-                p.DurationSeconds,
                 p.CreatedUtc.Ticks);
         }
 
@@ -904,14 +947,13 @@ namespace MultiSkyLineII
             for (var i = 1; i < parts.Length; i++)
             {
                 var fields = parts[i].Split(',');
-                if (fields.Length != 8)
+                if (fields.Length != 7)
                     continue;
 
                 if (!int.TryParse(fields[3], out var resourceId) ||
                     !int.TryParse(fields[4], out var unitsPerTick) ||
                     !int.TryParse(fields[5], out var pricePerUnit) ||
-                    !int.TryParse(fields[6], out var durationSeconds) ||
-                    !long.TryParse(fields[7], out var createdTicks))
+                    !long.TryParse(fields[6], out var createdTicks))
                     continue;
 
                 parsed.Add(new MultiplayerContractProposal
@@ -924,7 +966,6 @@ namespace MultiSkyLineII
                         : MultiplayerContractResource.Electricity,
                     UnitsPerTick = unitsPerTick,
                     PricePerUnit = pricePerUnit,
-                    DurationSeconds = durationSeconds,
                     CreatedUtc = new DateTime(createdTicks, DateTimeKind.Utc)
                 });
             }
@@ -938,6 +979,12 @@ namespace MultiSkyLineII
             public string ProposalId;
             public string ActorCity;
             public bool Accept;
+        }
+
+        private struct ContractCancel
+        {
+            public string ContractId;
+            public string ActorPlayer;
         }
 
         private static string SerializeContractDecision(string proposalId, string actorCity, bool accept)
@@ -967,6 +1014,29 @@ namespace MultiSkyLineII
             return true;
         }
 
+        private static string SerializeContractCancel(string contractId, string actorPlayer)
+        {
+            return $"CONTRACTCANCEL|{Uri.EscapeDataString(contractId)}|{Uri.EscapeDataString(actorPlayer)}";
+        }
+
+        private static bool TryParseContractCancel(string line, out ContractCancel cancel)
+        {
+            cancel = default;
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            var parts = line.Split('|');
+            if (parts.Length != 3 || !string.Equals(parts[0], "CONTRACTCANCEL", StringComparison.Ordinal))
+                return false;
+
+            cancel = new ContractCancel
+            {
+                ContractId = Uri.UnescapeDataString(parts[1]),
+                ActorPlayer = NormalizePlayerName(Uri.UnescapeDataString(parts[2]))
+            };
+            return true;
+        }
+
         private struct ContractProposal
         {
             public string SellerPlayer;
@@ -974,12 +1044,11 @@ namespace MultiSkyLineII
             public MultiplayerContractResource Resource;
             public int UnitsPerTick;
             public int PricePerUnit;
-            public int DurationSeconds;
         }
 
-        private static string SerializeContractRequest(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit, int durationSeconds)
+        private static string SerializeContractRequest(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit)
         {
-            return $"CONTRACTREQ|{Uri.EscapeDataString(sellerPlayer)}|{Uri.EscapeDataString(buyerPlayer)}|{(int)resource}|{unitsPerTick}|{pricePerUnit}|{durationSeconds}";
+            return $"CONTRACTREQ|{Uri.EscapeDataString(sellerPlayer)}|{Uri.EscapeDataString(buyerPlayer)}|{(int)resource}|{unitsPerTick}|{pricePerUnit}";
         }
 
         private static bool TryParseContractRequest(string line, out ContractProposal proposal)
@@ -989,13 +1058,12 @@ namespace MultiSkyLineII
                 return false;
 
             var parts = line.Split('|');
-            if (parts.Length != 7 || !string.Equals(parts[0], "CONTRACTREQ", StringComparison.Ordinal))
+            if (parts.Length != 6 || !string.Equals(parts[0], "CONTRACTREQ", StringComparison.Ordinal))
                 return false;
 
             if (!int.TryParse(parts[3], out var resourceId) ||
                 !int.TryParse(parts[4], out var unitsPerTick) ||
-                !int.TryParse(parts[5], out var pricePerUnit) ||
-                !int.TryParse(parts[6], out var durationSeconds))
+                !int.TryParse(parts[5], out var pricePerUnit))
                 return false;
 
             proposal = new ContractProposal
@@ -1006,15 +1074,9 @@ namespace MultiSkyLineII
                     ? (MultiplayerContractResource)resourceId
                     : MultiplayerContractResource.Electricity,
                 UnitsPerTick = unitsPerTick,
-                PricePerUnit = pricePerUnit,
-                DurationSeconds = durationSeconds
+                PricePerUnit = pricePerUnit
             };
             return true;
-        }
-
-        private static bool IsExpired(MultiplayerContract contract, DateTime nowUtc)
-        {
-            return contract.CreatedUtc.AddSeconds(contract.DurationSeconds) <= nowUtc;
         }
 
         private static bool IsExpired(MultiplayerContractProposal proposal, DateTime nowUtc)
@@ -1066,11 +1128,33 @@ namespace MultiSkyLineII
                 Resource = proposal.Resource,
                 UnitsPerTick = proposal.UnitsPerTick,
                 PricePerUnit = proposal.PricePerUnit,
-                DurationSeconds = proposal.DurationSeconds,
                 CreatedUtc = DateTime.UtcNow
             });
             AddDebugLog($"Proposal {proposalId} accepted by {actorCity}, contract active.");
 
+            return true;
+        }
+
+        private bool TryCancelContractInternal(string contractId, string actorPlayer, out string error)
+        {
+            error = null;
+            var index = _contracts.FindIndex(c => string.Equals(c.Id, contractId, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                error = "Contrat introuvable.";
+                return false;
+            }
+
+            var contract = _contracts[index];
+            if (!string.Equals(contract.SellerPlayer, actorPlayer, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(contract.BuyerPlayer, actorPlayer, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Seuls le vendeur ou l'acheteur peuvent annuler ce contrat.";
+                return false;
+            }
+
+            _contracts.RemoveAt(index);
+            AddDebugLog($"Contract {contractId} cancelled by {actorPlayer}.");
             return true;
         }
 
@@ -1083,7 +1167,7 @@ namespace MultiSkyLineII
             }
 
             playerName = NormalizePlayerName(playerName);
-            var local = ApplyAdjustments(_localStateProvider());
+            var local = ApplyAdjustments(GetLocalState());
             local.Name = NormalizePlayerName(local.Name);
             if (string.Equals(local.Name, playerName, StringComparison.OrdinalIgnoreCase))
             {
@@ -1128,7 +1212,6 @@ namespace MultiSkyLineII
                 return;
 
             _nextSettlementUtc = nowUtc.AddSeconds(2);
-            _contracts.RemoveAll(c => IsExpired(c, nowUtc));
             CleanupExpiredProposals(nowUtc);
             _resourceAdjustments.Clear();
 
@@ -1136,7 +1219,7 @@ namespace MultiSkyLineII
                 return;
 
             var effectiveStates = new Dictionary<string, MultiplayerResourceState>(StringComparer.OrdinalIgnoreCase);
-            var local = ApplyAdjustments(_localStateProvider());
+            var local = ApplyAdjustments(GetLocalState());
             effectiveStates[local.Name] = local;
             foreach (var kvp in _remoteStates)
             {
@@ -1152,7 +1235,12 @@ namespace MultiSkyLineII
 
                 var available = GetSellerAvailable(contract.Resource, seller);
                 if (available <= 0)
+                {
+                    AddDebugLog($"Contract {contract.Id} cancelled (seller no surplus).");
+                    _contracts.RemoveAt(i);
+                    i--;
                     continue;
+                }
 
                 var affordableUnits = contract.PricePerUnit <= 0 ? 0 : Math.Max(0, buyer.Money / contract.PricePerUnit);
                 var transferUnits = Math.Min(contract.UnitsPerTick, Math.Min(available, affordableUnits));
