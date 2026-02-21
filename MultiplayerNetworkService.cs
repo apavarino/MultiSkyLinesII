@@ -1,4 +1,5 @@
-using System;
+﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -13,6 +14,7 @@ namespace MultiSkyLineII
 {
     public sealed class MultiplayerNetworkService : IDisposable
     {
+        private const string FallbackPlayerName = "Unknown Player";
         private readonly ILog _log;
         private readonly Func<MultiplayerResourceState> _localStateProvider;
 
@@ -22,9 +24,38 @@ namespace MultiSkyLineII
         private readonly object _sync = new object();
         private readonly Dictionary<string, MultiplayerResourceState> _remoteStates = new Dictionary<string, MultiplayerResourceState>(StringComparer.OrdinalIgnoreCase);
         private readonly List<TcpClient> _hostClients = new List<TcpClient>();
+        private readonly List<MultiplayerContract> _contracts = new List<MultiplayerContract>();
+        private readonly List<MultiplayerContractProposal> _pendingProposals = new List<MultiplayerContractProposal>();
+        private readonly Dictionary<string, int> _moneyAdjustments = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ResourceDelta> _resourceAdjustments = new Dictionary<string, ResourceDelta>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentQueue<string> _outboundMessages = new ConcurrentQueue<string>();
+        private MultiplayerResourceState? _authoritativeLocalState;
+        private DateTime _nextSettlementUtc = DateTime.UtcNow;
+        private const int ProposalTimeoutSeconds = 120;
+        private string _configuredBindAddress = "0.0.0.0";
+        private string _configuredServerAddress = "127.0.0.1";
+        private int _configuredPort = 25565;
+
+        private struct ResourceDelta
+        {
+            public int ElectricityProduction;
+            public int ElectricityFulfilled;
+            public int WaterCapacity;
+            public int WaterFulfilled;
+            public int SewageCapacity;
+            public int SewageFulfilled;
+        }
+
+        private static string NormalizePlayerName(string playerName)
+        {
+            return string.IsNullOrWhiteSpace(playerName) ? FallbackPlayerName : playerName.Trim();
+        }
 
         public bool IsRunning => _cts != null;
         public bool IsHost { get; private set; }
+        public string DestinationEndpoint => IsHost
+            ? $"{_configuredBindAddress}:{_configuredPort}"
+            : $"{_configuredServerAddress}:{_configuredPort}";
 
         public MultiplayerNetworkService(ILog log, Func<MultiplayerResourceState> localStateProvider)
         {
@@ -55,6 +86,22 @@ namespace MultiSkyLineII
             _cts = new CancellationTokenSource();
             var token = _cts.Token;
             IsHost = settings.HostMode;
+            _configuredBindAddress = string.IsNullOrWhiteSpace(settings.BindAddress) ? "0.0.0.0" : settings.BindAddress.Trim();
+            _configuredServerAddress = string.IsNullOrWhiteSpace(settings.ServerAddress) ? "127.0.0.1" : settings.ServerAddress.Trim();
+            _configuredPort = settings.Port;
+
+            if (!settings.HostMode &&
+                (string.Equals(settings.ServerAddress, "127.0.0.1", StringComparison.OrdinalIgnoreCase) ||
+                 string.Equals(settings.ServerAddress, "localhost", StringComparison.OrdinalIgnoreCase)))
+            {
+                _log.Warn("Client mode is targeting localhost. Use the host machine IP for remote multiplayer.");
+            }
+
+            if (settings.HostMode &&
+                string.Equals(settings.BindAddress, "127.0.0.1", StringComparison.OrdinalIgnoreCase))
+            {
+                _log.Warn("Host bind address is 127.0.0.1 (local only). Use 0.0.0.0 for LAN/WAN clients.");
+            }
 
             if (settings.HostMode)
             {
@@ -117,6 +164,12 @@ namespace MultiSkyLineII
                 _cts = null;
                 _remoteStates.Clear();
                 _hostClients.Clear();
+                _contracts.Clear();
+                _pendingProposals.Clear();
+                _moneyAdjustments.Clear();
+                _resourceAdjustments.Clear();
+                _authoritativeLocalState = null;
+                while (_outboundMessages.TryDequeue(out _)) { }
                 IsHost = false;
             }
         }
@@ -204,90 +257,196 @@ namespace MultiSkyLineII
             var pendingPings = new Dictionary<long, DateTime>();
             long pingSequence = 0;
             var currentRttMs = -1;
-
-            using (var stream = client.GetStream())
-            using (var reader = new StreamReader(stream, Encoding.UTF8, false, 1024, true))
-            using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true) { AutoFlush = true })
+            try
             {
-                await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
-
-                while (!token.IsCancellationRequested && client.Connected)
+                using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, Encoding.UTF8, false, 1024, true))
+                using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true) { AutoFlush = true })
                 {
-                    var readTask = reader.ReadLineAsync();
-                    var completed = await Task.WhenAny(readTask, Task.Delay(2000, token)).ConfigureAwait(false);
+                    await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                    Task<string> pendingReadTask = null;
+                    var nextSyncUtc = DateTime.UtcNow;
 
-                    if (completed == readTask)
+                    while (!token.IsCancellationRequested && client.Connected)
                     {
-                        var line = readTask.Result;
-                        if (line == null)
+                        while (_outboundMessages.TryDequeue(out var pending))
                         {
-                            _log.Info("Peer disconnected.");
-                            break;
+                            await writer.WriteLineAsync(pending).ConfigureAwait(false);
                         }
 
-                        if (TryParsePingRequest(line, out var pingReqId))
+                        pendingReadTask ??= reader.ReadLineAsync();
+                        var completed = await Task.WhenAny(pendingReadTask, Task.Delay(200, token)).ConfigureAwait(false);
+
+                        if (completed == pendingReadTask)
                         {
-                            await writer.WriteLineAsync(SerializePingResponse(pingReqId)).ConfigureAwait(false);
-                        }
-                        else if (TryParsePingResponse(line, out var pingRespId))
-                        {
-                            if (pendingPings.TryGetValue(pingRespId, out var sentAt))
+                            var line = pendingReadTask.Result;
+                            pendingReadTask = null;
+                            if (line == null)
                             {
-                                pendingPings.Remove(pingRespId);
-                                currentRttMs = Math.Max(0, (int)(DateTime.UtcNow - sentAt).TotalMilliseconds);
+                                _log.Info("Peer disconnected.");
+                                break;
                             }
-                        }
-                        else if (TryParseState(line, out var remote))
-                        {
-                            remoteName = remote.Name;
-                            remote.PingMs = currentRttMs;
-                            lock (_sync)
+
+                            if (TryParsePingRequest(line, out var pingReqId))
                             {
-                                _remoteStates[remote.Name] = remote;
+                                await writer.WriteLineAsync(SerializePingResponse(pingReqId)).ConfigureAwait(false);
                             }
-                        }
-                        else if (TryParseSnapshot(line, out var snapshotStates))
-                        {
-                            lock (_sync)
+                            else if (TryParsePingResponse(line, out var pingRespId))
                             {
-                                _remoteStates.Clear();
-                                foreach (var state in snapshotStates)
+                                if (pendingPings.TryGetValue(pingRespId, out var sentAt))
                                 {
-                                    _remoteStates[state.Name] = state;
+                                    pendingPings.Remove(pingRespId);
+                                    currentRttMs = Math.Max(0, (int)(DateTime.UtcNow - sentAt).TotalMilliseconds);
                                 }
                             }
-                        }
-                        else
-                        {
-                            _log.Info($"Net RX: {line}");
-                        }
-                    }
-                    else
-                    {
-                        var pingId = ++pingSequence;
-                        pendingPings[pingId] = DateTime.UtcNow;
-                        await writer.WriteLineAsync(SerializePingRequest(pingId)).ConfigureAwait(false);
+                            else if (TryParseState(line, out var remote))
+                            {
+                                remote.Name = NormalizePlayerName(remote.Name);
+                                remoteName = remote.Name;
+                                remote.PingMs = currentRttMs;
+                                lock (_sync)
+                                {
+                                    _remoteStates[remote.Name] = remote;
+                                }
+                            }
+                            else if (TryParseSnapshot(line, out var snapshotStates))
+                            {
+                                lock (_sync)
+                                {
+                                    _remoteStates.Clear();
+                                    var localPlayerName = NormalizePlayerName(_localStateProvider().Name);
+                                    MultiplayerResourceState? authoritative = null;
+                                    foreach (var state in snapshotStates)
+                                    {
+                                        var normalizedState = state;
+                                        normalizedState.Name = NormalizePlayerName(normalizedState.Name);
+                                        if (!IsHost && string.Equals(normalizedState.Name, localPlayerName, StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            authoritative = normalizedState;
+                                            continue;
+                                        }
 
-                        if (IsHost)
-                        {
-                            await writer.WriteLineAsync(SerializeSnapshot()).ConfigureAwait(false);
+                                        _remoteStates[normalizedState.Name] = normalizedState;
+                                    }
+
+                                    if (!IsHost)
+                                    {
+                                        _authoritativeLocalState = authoritative;
+                                    }
+                                }
+                            }
+                            else if (TryParseContracts(line, out var contracts))
+                            {
+                                lock (_sync)
+                                {
+                                    _contracts.Clear();
+                                    _contracts.AddRange(contracts);
+                                }
+                            }
+                            else if (TryParseProposals(line, out var proposals))
+                            {
+                                lock (_sync)
+                                {
+                                    _pendingProposals.Clear();
+                                    _pendingProposals.AddRange(proposals);
+                                }
+                            }
+                            else if (IsHost && TryParseContractRequest(line, out var proposal))
+                            {
+                                lock (_sync)
+                                {
+                                    if (TryGetStateByPlayer(proposal.SellerPlayer, out var sellerState) &&
+                                        TryGetStateByPlayer(proposal.BuyerPlayer, out _))
+                                    {
+                                        _pendingProposals.Add(new MultiplayerContractProposal
+                                        {
+                                            Id = Guid.NewGuid().ToString("N"),
+                                            SellerPlayer = sellerState.Name,
+                                            BuyerPlayer = proposal.BuyerPlayer,
+                                            Resource = proposal.Resource,
+                                            UnitsPerTick = proposal.UnitsPerTick,
+                                            PricePerUnit = proposal.PricePerUnit,
+                                            DurationSeconds = proposal.DurationSeconds,
+                                            CreatedUtc = DateTime.UtcNow
+                                        });
+                                    }
+                                }
+                            }
+                            else if (IsHost && TryParseContractDecision(line, out var decision))
+                            {
+                                lock (_sync)
+                                {
+                                    if (!TryApplyProposalDecision(decision.ProposalId, decision.ActorCity, decision.Accept, out var decisionError))
+                                    {
+                                        _log.Warn($"Contract decision ignored: {decisionError}");
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                _log.Info($"Net RX: {line}");
+                            }
                         }
-                        else
+                        if (DateTime.UtcNow >= nextSyncUtc)
                         {
-                            await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                            var pingId = ++pingSequence;
+                            pendingPings[pingId] = DateTime.UtcNow;
+                            await writer.WriteLineAsync(SerializePingRequest(pingId)).ConfigureAwait(false);
+
+                            if (IsHost)
+                            {
+                                await writer.WriteLineAsync(SerializeSnapshot()).ConfigureAwait(false);
+                                await writer.WriteLineAsync(SerializeContracts()).ConfigureAwait(false);
+                                await writer.WriteLineAsync(SerializeProposals()).ConfigureAwait(false);
+                            }
+                            else
+                            {
+                                await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                            }
+
+                            nextSyncUtc = DateTime.UtcNow.AddSeconds(2);
                         }
                     }
                 }
             }
-
-            lock (_sync)
+            catch (OperationCanceledException)
             {
-                if (IsHost)
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (IOException e)
+            {
+                if (!token.IsCancellationRequested)
                 {
-                    _hostClients.Remove(client);
-                    if (!string.IsNullOrWhiteSpace(remoteName))
+                    _log.Info($"Peer socket closed: {e.Message}");
+                }
+            }
+            catch (SocketException e)
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    _log.Info($"Peer socket error: {e.Message}");
+                }
+            }
+            catch (Exception e)
+            {
+                if (!token.IsCancellationRequested)
+                {
+                    _log.Warn($"Client handler crashed: {e.Message}");
+                }
+            }
+            finally
+            {
+                lock (_sync)
+                {
+                    if (IsHost)
                     {
-                        _remoteStates.Remove(remoteName);
+                        _hostClients.Remove(client);
+                        if (!string.IsNullOrWhiteSpace(remoteName))
+                        {
+                            _remoteStates.Remove(remoteName);
+                        }
                     }
                 }
             }
@@ -323,17 +482,133 @@ namespace MultiSkyLineII
             return _localStateProvider();
         }
 
+        public IReadOnlyList<MultiplayerContract> GetActiveContracts()
+        {
+            lock (_sync)
+            {
+                return _contracts
+                    .Where(c => !IsExpired(c, DateTime.UtcNow))
+                    .OrderBy(c => c.CreatedUtc)
+                    .ToList();
+            }
+        }
+
+        public IReadOnlyList<MultiplayerContractProposal> GetPendingProposals()
+        {
+            lock (_sync)
+            {
+                CleanupExpiredProposals(DateTime.UtcNow);
+                return _pendingProposals
+                    .OrderBy(p => p.CreatedUtc)
+                    .ToList();
+            }
+        }
+
+        public bool TryRespondToProposal(string proposalId, bool accept, out string error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(proposalId))
+            {
+                error = "Proposition invalide.";
+                return false;
+            }
+
+            var actorCity = _localStateProvider().Name;
+            if (IsHost)
+            {
+                lock (_sync)
+                {
+                    return TryApplyProposalDecision(proposalId, actorCity, accept, out error);
+                }
+            }
+
+            _outboundMessages.Enqueue(SerializeContractDecision(proposalId, actorCity, accept));
+            return true;
+        }
+
+        public bool TryProposeContract(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit, int durationSeconds, out string error)
+        {
+            error = null;
+            if (string.IsNullOrWhiteSpace(sellerPlayer) || string.IsNullOrWhiteSpace(buyerPlayer))
+            {
+                error = "Joueur invalide.";
+                return false;
+            }
+
+            sellerPlayer = NormalizePlayerName(sellerPlayer);
+            buyerPlayer = NormalizePlayerName(buyerPlayer);
+
+            if (string.Equals(sellerPlayer, buyerPlayer, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Le vendeur et l'acheteur doivent etre differents.";
+                return false;
+            }
+
+            if (unitsPerTick <= 0 || pricePerUnit <= 0 || durationSeconds <= 0)
+            {
+                error = "Parametres de contrat invalides.";
+                return false;
+            }
+
+            if (IsHost)
+            {
+                lock (_sync)
+                {
+                    var now = DateTime.UtcNow;
+                    if (!TryGetStateByPlayer(sellerPlayer, out var sellerState))
+                    {
+                        error = "Joueur vendeur introuvable.";
+                        return false;
+                    }
+
+                    if (!TryGetStateByPlayer(buyerPlayer, out _))
+                    {
+                        error = "Joueur acheteur introuvable.";
+                        return false;
+                    }
+
+                    var proposal = new MultiplayerContractProposal
+                    {
+                        Id = Guid.NewGuid().ToString("N"),
+                        SellerPlayer = sellerState.Name,
+                        BuyerPlayer = buyerPlayer,
+                        Resource = resource,
+                        UnitsPerTick = unitsPerTick,
+                        PricePerUnit = pricePerUnit,
+                        DurationSeconds = durationSeconds,
+                        CreatedUtc = now
+                    };
+                    _pendingProposals.Add(proposal);
+                }
+
+                return true;
+            }
+
+            var request = SerializeContractRequest(sellerPlayer, buyerPlayer, resource, unitsPerTick, pricePerUnit, durationSeconds);
+            _outboundMessages.Enqueue(request);
+            return true;
+        }
+
         public IReadOnlyList<MultiplayerResourceState> GetConnectedStates()
         {
             lock (_sync)
             {
-                var local = _localStateProvider();
+                if (IsHost)
+                {
+                    ApplyContractSettlementsIfDue(DateTime.UtcNow);
+                }
+
+                var local = IsHost
+                    ? ApplyAdjustments(_localStateProvider())
+                    : (_authoritativeLocalState ?? _localStateProvider());
+                local.Name = NormalizePlayerName(local.Name);
+
                 var result = new List<MultiplayerResourceState> { local };
                 foreach (var kvp in _remoteStates)
                 {
                     if (!string.Equals(kvp.Key, local.Name, StringComparison.OrdinalIgnoreCase))
                     {
-                        result.Add(kvp.Value);
+                        result.Add(IsHost ? ApplyAdjustments(kvp.Value) : kvp.Value);
                     }
                 }
                 return result.OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ToList();
@@ -342,7 +617,7 @@ namespace MultiSkyLineII
 
         private static string SerializeState(MultiplayerResourceState state)
         {
-            var encoded = Uri.EscapeDataString(state.Name ?? "Unknown");
+            var encoded = Uri.EscapeDataString(NormalizePlayerName(state.Name));
             return $"STATE|{encoded}|{state.Money}|{state.Population}|{state.ElectricityProduction}|{state.ElectricityConsumption}|{state.ElectricityFulfilledConsumption}|{state.FreshWaterCapacity}|{state.FreshWaterConsumption}|{state.FreshWaterFulfilledConsumption}|{state.SewageCapacity}|{state.SewageConsumption}|{state.SewageFulfilledConsumption}|{state.PingMs}";
         }
 
@@ -372,7 +647,7 @@ namespace MultiSkyLineII
 
             state = new MultiplayerResourceState
             {
-                Name = Uri.UnescapeDataString(parts[1]),
+                Name = NormalizePlayerName(Uri.UnescapeDataString(parts[1])),
                 Money = money,
                 Population = population,
                 ElectricityProduction = electricityProduction,
@@ -432,7 +707,7 @@ namespace MultiSkyLineII
 
                 parsed.Add(new MultiplayerResourceState
                 {
-                    Name = Uri.UnescapeDataString(entry[0]),
+                    Name = NormalizePlayerName(Uri.UnescapeDataString(entry[0])),
                     Money = money,
                     Population = population,
                     ElectricityProduction = electricityProduction,
@@ -451,6 +726,452 @@ namespace MultiSkyLineII
 
             states = parsed;
             return true;
+        }
+
+        private string SerializeContracts()
+        {
+            var now = DateTime.UtcNow;
+            _contracts.RemoveAll(c => IsExpired(c, now));
+            if (_contracts.Count == 0)
+                return "CONTRACTS";
+
+            var entries = _contracts.Select(SerializeContract).ToArray();
+            return "CONTRACTS|" + string.Join("|", entries);
+        }
+
+        private static string SerializeContract(MultiplayerContract c)
+        {
+            return string.Join(",",
+                Uri.EscapeDataString(c.Id ?? string.Empty),
+                Uri.EscapeDataString(c.SellerPlayer ?? string.Empty),
+                Uri.EscapeDataString(c.BuyerPlayer ?? string.Empty),
+                (int)c.Resource,
+                c.UnitsPerTick,
+                c.PricePerUnit,
+                c.DurationSeconds,
+                c.CreatedUtc.Ticks);
+        }
+
+        private static bool TryParseContracts(string line, out List<MultiplayerContract> contracts)
+        {
+            contracts = null;
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            var parts = line.Split('|');
+            if (parts.Length < 1 || !string.Equals(parts[0], "CONTRACTS", StringComparison.Ordinal))
+                return false;
+
+            var parsed = new List<MultiplayerContract>();
+            for (var i = 1; i < parts.Length; i++)
+            {
+                var fields = parts[i].Split(',');
+                if (fields.Length != 8)
+                    continue;
+
+                if (!int.TryParse(fields[3], out var resourceId) ||
+                    !int.TryParse(fields[4], out var unitsPerTick) ||
+                    !int.TryParse(fields[5], out var pricePerUnit) ||
+                    !int.TryParse(fields[6], out var durationSeconds) ||
+                    !long.TryParse(fields[7], out var createdTicks))
+                    continue;
+
+                parsed.Add(new MultiplayerContract
+                {
+                    Id = Uri.UnescapeDataString(fields[0]),
+                    SellerPlayer = NormalizePlayerName(Uri.UnescapeDataString(fields[1])),
+                    BuyerPlayer = NormalizePlayerName(Uri.UnescapeDataString(fields[2])),
+                    Resource = Enum.IsDefined(typeof(MultiplayerContractResource), resourceId)
+                        ? (MultiplayerContractResource)resourceId
+                        : MultiplayerContractResource.Electricity,
+                    UnitsPerTick = unitsPerTick,
+                    PricePerUnit = pricePerUnit,
+                    DurationSeconds = durationSeconds,
+                    CreatedUtc = new DateTime(createdTicks, DateTimeKind.Utc)
+                });
+            }
+
+            contracts = parsed;
+            return true;
+        }
+
+        private string SerializeProposals()
+        {
+            var now = DateTime.UtcNow;
+            CleanupExpiredProposals(now);
+            if (_pendingProposals.Count == 0)
+                return "PROPOSALS";
+
+            var entries = _pendingProposals.Select(SerializeProposal).ToArray();
+            return "PROPOSALS|" + string.Join("|", entries);
+        }
+
+        private static string SerializeProposal(MultiplayerContractProposal p)
+        {
+            return string.Join(",",
+                Uri.EscapeDataString(p.Id ?? string.Empty),
+                Uri.EscapeDataString(p.SellerPlayer ?? string.Empty),
+                Uri.EscapeDataString(p.BuyerPlayer ?? string.Empty),
+                (int)p.Resource,
+                p.UnitsPerTick,
+                p.PricePerUnit,
+                p.DurationSeconds,
+                p.CreatedUtc.Ticks);
+        }
+
+        private static bool TryParseProposals(string line, out List<MultiplayerContractProposal> proposals)
+        {
+            proposals = null;
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            var parts = line.Split('|');
+            if (parts.Length < 1 || !string.Equals(parts[0], "PROPOSALS", StringComparison.Ordinal))
+                return false;
+
+            var parsed = new List<MultiplayerContractProposal>();
+            for (var i = 1; i < parts.Length; i++)
+            {
+                var fields = parts[i].Split(',');
+                if (fields.Length != 8)
+                    continue;
+
+                if (!int.TryParse(fields[3], out var resourceId) ||
+                    !int.TryParse(fields[4], out var unitsPerTick) ||
+                    !int.TryParse(fields[5], out var pricePerUnit) ||
+                    !int.TryParse(fields[6], out var durationSeconds) ||
+                    !long.TryParse(fields[7], out var createdTicks))
+                    continue;
+
+                parsed.Add(new MultiplayerContractProposal
+                {
+                    Id = Uri.UnescapeDataString(fields[0]),
+                    SellerPlayer = NormalizePlayerName(Uri.UnescapeDataString(fields[1])),
+                    BuyerPlayer = NormalizePlayerName(Uri.UnescapeDataString(fields[2])),
+                    Resource = Enum.IsDefined(typeof(MultiplayerContractResource), resourceId)
+                        ? (MultiplayerContractResource)resourceId
+                        : MultiplayerContractResource.Electricity,
+                    UnitsPerTick = unitsPerTick,
+                    PricePerUnit = pricePerUnit,
+                    DurationSeconds = durationSeconds,
+                    CreatedUtc = new DateTime(createdTicks, DateTimeKind.Utc)
+                });
+            }
+
+            proposals = parsed;
+            return true;
+        }
+
+        private struct ContractDecision
+        {
+            public string ProposalId;
+            public string ActorCity;
+            public bool Accept;
+        }
+
+        private static string SerializeContractDecision(string proposalId, string actorCity, bool accept)
+        {
+            return $"CONTRACTDECISION|{Uri.EscapeDataString(proposalId)}|{Uri.EscapeDataString(actorCity)}|{(accept ? 1 : 0)}";
+        }
+
+        private static bool TryParseContractDecision(string line, out ContractDecision decision)
+        {
+            decision = default;
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            var parts = line.Split('|');
+            if (parts.Length != 4 || !string.Equals(parts[0], "CONTRACTDECISION", StringComparison.Ordinal))
+                return false;
+
+            if (!int.TryParse(parts[3], out var acceptFlag))
+                return false;
+
+            decision = new ContractDecision
+            {
+                ProposalId = Uri.UnescapeDataString(parts[1]),
+                ActorCity = Uri.UnescapeDataString(parts[2]),
+                Accept = acceptFlag == 1
+            };
+            return true;
+        }
+
+        private struct ContractProposal
+        {
+            public string SellerPlayer;
+            public string BuyerPlayer;
+            public MultiplayerContractResource Resource;
+            public int UnitsPerTick;
+            public int PricePerUnit;
+            public int DurationSeconds;
+        }
+
+        private static string SerializeContractRequest(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerUnit, int durationSeconds)
+        {
+            return $"CONTRACTREQ|{Uri.EscapeDataString(sellerPlayer)}|{Uri.EscapeDataString(buyerPlayer)}|{(int)resource}|{unitsPerTick}|{pricePerUnit}|{durationSeconds}";
+        }
+
+        private static bool TryParseContractRequest(string line, out ContractProposal proposal)
+        {
+            proposal = default;
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            var parts = line.Split('|');
+            if (parts.Length != 7 || !string.Equals(parts[0], "CONTRACTREQ", StringComparison.Ordinal))
+                return false;
+
+            if (!int.TryParse(parts[3], out var resourceId) ||
+                !int.TryParse(parts[4], out var unitsPerTick) ||
+                !int.TryParse(parts[5], out var pricePerUnit) ||
+                !int.TryParse(parts[6], out var durationSeconds))
+                return false;
+
+            proposal = new ContractProposal
+            {
+                SellerPlayer = NormalizePlayerName(Uri.UnescapeDataString(parts[1])),
+                BuyerPlayer = NormalizePlayerName(Uri.UnescapeDataString(parts[2])),
+                Resource = Enum.IsDefined(typeof(MultiplayerContractResource), resourceId)
+                    ? (MultiplayerContractResource)resourceId
+                    : MultiplayerContractResource.Electricity,
+                UnitsPerTick = unitsPerTick,
+                PricePerUnit = pricePerUnit,
+                DurationSeconds = durationSeconds
+            };
+            return true;
+        }
+
+        private static bool IsExpired(MultiplayerContract contract, DateTime nowUtc)
+        {
+            return contract.CreatedUtc.AddSeconds(contract.DurationSeconds) <= nowUtc;
+        }
+
+        private static bool IsExpired(MultiplayerContractProposal proposal, DateTime nowUtc)
+        {
+            return proposal.CreatedUtc.AddSeconds(ProposalTimeoutSeconds) <= nowUtc;
+        }
+
+        private void CleanupExpiredProposals(DateTime nowUtc)
+        {
+            _pendingProposals.RemoveAll(p => IsExpired(p, nowUtc));
+        }
+
+        private bool TryApplyProposalDecision(string proposalId, string actorCity, bool accept, out string error)
+        {
+            error = null;
+            CleanupExpiredProposals(DateTime.UtcNow);
+            var index = _pendingProposals.FindIndex(p => string.Equals(p.Id, proposalId, StringComparison.OrdinalIgnoreCase));
+            if (index < 0)
+            {
+                error = "Proposition introuvable ou expiree.";
+                return false;
+            }
+
+            var proposal = _pendingProposals[index];
+            if (!string.Equals(proposal.SellerPlayer, actorCity, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Seul le joueur vendeur peut repondre.";
+                return false;
+            }
+
+            _pendingProposals.RemoveAt(index);
+            if (!accept)
+                return true;
+
+            if (!TryGetStateByPlayer(proposal.SellerPlayer, out _) || !TryGetStateByPlayer(proposal.BuyerPlayer, out _))
+            {
+                error = "Joueurs introuvables au moment de l'acceptation.";
+                return false;
+            }
+
+            _contracts.Add(new MultiplayerContract
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                SellerPlayer = proposal.SellerPlayer,
+                BuyerPlayer = proposal.BuyerPlayer,
+                Resource = proposal.Resource,
+                UnitsPerTick = proposal.UnitsPerTick,
+                PricePerUnit = proposal.PricePerUnit,
+                DurationSeconds = proposal.DurationSeconds,
+                CreatedUtc = DateTime.UtcNow
+            });
+
+            return true;
+        }
+
+        private bool TryGetStateByPlayer(string playerName, out MultiplayerResourceState state)
+        {
+            if (string.IsNullOrWhiteSpace(playerName))
+            {
+                state = default;
+                return false;
+            }
+
+            playerName = NormalizePlayerName(playerName);
+            var local = ApplyAdjustments(_localStateProvider());
+            local.Name = NormalizePlayerName(local.Name);
+            if (string.Equals(local.Name, playerName, StringComparison.OrdinalIgnoreCase))
+            {
+                state = local;
+                return true;
+            }
+
+            if (_remoteStates.TryGetValue(playerName, out var remote))
+            {
+                state = ApplyAdjustments(remote);
+                return true;
+            }
+
+            state = default;
+            return false;
+        }
+
+        private MultiplayerResourceState ApplyAdjustments(MultiplayerResourceState state)
+        {
+            state.Name = NormalizePlayerName(state.Name);
+            if (_moneyAdjustments.TryGetValue(state.Name, out var moneyDelta))
+            {
+                state.Money += moneyDelta;
+            }
+
+            if (_resourceAdjustments.TryGetValue(state.Name, out var delta))
+            {
+                state.ElectricityProduction = Math.Max(0, state.ElectricityProduction + delta.ElectricityProduction);
+                state.ElectricityFulfilledConsumption = Math.Max(0, state.ElectricityFulfilledConsumption + delta.ElectricityFulfilled);
+                state.FreshWaterCapacity = Math.Max(0, state.FreshWaterCapacity + delta.WaterCapacity);
+                state.FreshWaterFulfilledConsumption = Math.Max(0, state.FreshWaterFulfilledConsumption + delta.WaterFulfilled);
+                state.SewageCapacity = Math.Max(0, state.SewageCapacity + delta.SewageCapacity);
+                state.SewageFulfilledConsumption = Math.Max(0, state.SewageFulfilledConsumption + delta.SewageFulfilled);
+            }
+
+            return state;
+        }
+
+        private void ApplyContractSettlementsIfDue(DateTime nowUtc)
+        {
+            if (nowUtc < _nextSettlementUtc)
+                return;
+
+            _nextSettlementUtc = nowUtc.AddSeconds(2);
+            _contracts.RemoveAll(c => IsExpired(c, nowUtc));
+            CleanupExpiredProposals(nowUtc);
+            _resourceAdjustments.Clear();
+
+            if (_contracts.Count == 0)
+                return;
+
+            var effectiveStates = new Dictionary<string, MultiplayerResourceState>(StringComparer.OrdinalIgnoreCase);
+            var local = ApplyAdjustments(_localStateProvider());
+            effectiveStates[local.Name] = local;
+            foreach (var kvp in _remoteStates)
+            {
+                effectiveStates[kvp.Key] = ApplyAdjustments(kvp.Value);
+            }
+
+            for (var i = 0; i < _contracts.Count; i++)
+            {
+                var contract = _contracts[i];
+                if (!effectiveStates.TryGetValue(contract.SellerPlayer, out var seller) ||
+                    !effectiveStates.TryGetValue(contract.BuyerPlayer, out var buyer))
+                    continue;
+
+                var available = GetSellerAvailable(contract.Resource, seller);
+                if (available <= 0)
+                    continue;
+
+                var affordableUnits = contract.PricePerUnit <= 0 ? 0 : Math.Max(0, buyer.Money / contract.PricePerUnit);
+                var transferUnits = Math.Min(contract.UnitsPerTick, Math.Min(available, affordableUnits));
+                if (transferUnits <= 0)
+                    continue;
+
+                var payment = transferUnits * contract.PricePerUnit;
+                seller.Money += payment;
+                buyer.Money -= payment;
+
+                ApplyResourceTransfer(contract.Resource, ref seller, ref buyer, transferUnits);
+                AddMoneyAdjustment(contract.SellerPlayer, payment);
+                AddMoneyAdjustment(contract.BuyerPlayer, -payment);
+                AddResourceAdjustment(contract.SellerPlayer, contract.Resource, -transferUnits, false);
+                AddResourceAdjustment(contract.BuyerPlayer, contract.Resource, transferUnits, true);
+
+                effectiveStates[contract.SellerPlayer] = seller;
+                effectiveStates[contract.BuyerPlayer] = buyer;
+            }
+        }
+
+        private static int GetSellerAvailable(MultiplayerContractResource resource, MultiplayerResourceState state)
+        {
+            switch (resource)
+            {
+                case MultiplayerContractResource.Electricity:
+                    return Math.Max(0, state.ElectricityProduction - state.ElectricityConsumption);
+                case MultiplayerContractResource.FreshWater:
+                    return Math.Max(0, state.FreshWaterCapacity - state.FreshWaterConsumption);
+                case MultiplayerContractResource.Sewage:
+                    return Math.Max(0, state.SewageCapacity - state.SewageConsumption);
+                default:
+                    return 0;
+            }
+        }
+
+        private static void ApplyResourceTransfer(MultiplayerContractResource resource, ref MultiplayerResourceState seller, ref MultiplayerResourceState buyer, int units)
+        {
+            switch (resource)
+            {
+                case MultiplayerContractResource.Electricity:
+                    seller.ElectricityProduction = Math.Max(0, seller.ElectricityProduction - units);
+                    buyer.ElectricityFulfilledConsumption = Math.Min(buyer.ElectricityConsumption, buyer.ElectricityFulfilledConsumption + units);
+                    break;
+                case MultiplayerContractResource.FreshWater:
+                    seller.FreshWaterCapacity = Math.Max(0, seller.FreshWaterCapacity - units);
+                    buyer.FreshWaterFulfilledConsumption = Math.Min(buyer.FreshWaterConsumption, buyer.FreshWaterFulfilledConsumption + units);
+                    break;
+                case MultiplayerContractResource.Sewage:
+                    seller.SewageCapacity = Math.Max(0, seller.SewageCapacity - units);
+                    buyer.SewageFulfilledConsumption = Math.Min(buyer.SewageConsumption, buyer.SewageFulfilledConsumption + units);
+                    break;
+            }
+        }
+
+        private void AddMoneyAdjustment(string playerName, int value)
+        {
+            if (string.IsNullOrWhiteSpace(playerName) || value == 0)
+                return;
+
+            playerName = NormalizePlayerName(playerName);
+            _moneyAdjustments.TryGetValue(playerName, out var current);
+            _moneyAdjustments[playerName] = current + value;
+        }
+
+        private void AddResourceAdjustment(string playerName, MultiplayerContractResource resource, int value, bool isBuyer)
+        {
+            if (string.IsNullOrWhiteSpace(playerName) || value == 0)
+                return;
+
+            playerName = NormalizePlayerName(playerName);
+            _resourceAdjustments.TryGetValue(playerName, out var delta);
+            switch (resource)
+            {
+                case MultiplayerContractResource.Electricity:
+                    if (isBuyer)
+                        delta.ElectricityFulfilled += value;
+                    else
+                        delta.ElectricityProduction += value;
+                    break;
+                case MultiplayerContractResource.FreshWater:
+                    if (isBuyer)
+                        delta.WaterFulfilled += value;
+                    else
+                        delta.WaterCapacity += value;
+                    break;
+                case MultiplayerContractResource.Sewage:
+                    if (isBuyer)
+                        delta.SewageFulfilled += value;
+                    else
+                        delta.SewageCapacity += value;
+                    break;
+            }
+            _resourceAdjustments[playerName] = delta;
         }
 
         private static string SerializePingRequest(long id)
@@ -482,3 +1203,6 @@ namespace MultiSkyLineII
         }
     }
 }
+
+
+

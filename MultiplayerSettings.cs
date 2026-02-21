@@ -1,6 +1,7 @@
 using Colossal.IO.AssetDatabase;
 using Game.Modding;
 using Game.Settings;
+using System;
 
 namespace MultiSkyLineII
 {
@@ -25,6 +26,10 @@ namespace MultiSkyLineII
         [SettingsUITextInput]
         public int Port { get; set; }
 
+        [SettingsUISection("General")]
+        [SettingsUITextInput]
+        public string PlayerName { get; set; }
+
         public MultiplayerSettings(IMod mod) : base(mod)
         {
             SetDefaults();
@@ -37,6 +42,12 @@ namespace MultiSkyLineII
             BindAddress = "0.0.0.0";
             ServerAddress = "127.0.0.1";
             Port = 25565;
+            PlayerName = CreateRandomPlayerName();
+        }
+
+        public static string CreateRandomPlayerName()
+        {
+            return $"Player-{Guid.NewGuid().ToString("N").Substring(0, 6)}";
         }
     }
 }

@@ -4,8 +4,9 @@ using Game.Modding;
 using Game.SceneFlow;
 using Game.Settings;
 using System;
-using System.Collections.Generic;
+using System.IO;
 using System.Reflection;
+using System.Xml.Linq;
 using UnityEngine;
 
 namespace MultiSkyLineII
@@ -14,13 +15,14 @@ namespace MultiSkyLineII
     {
         public static ILog log = LogManager.GetLogger($"{nameof(MultiSkyLineII)}.{nameof(Mod)}")
             .SetShowsErrorsInUI(false);
+        public static string DisplayVersion { get; private set; } = "1.0.0";
         private MultiplayerSettings _settings;
         private MultiplayerNetworkService _network;
         private MultiplayerLocaleSource _localeSource;
         private string[] _registeredLocales;
         private MultiplayerHudOverlay _hudOverlay;
-        private string _cachedCityName = "Unknown City";
-        private DateTime _nextCityNameRefreshUtc;
+        private string _cachedPlayerName = "Unknown Player";
+        private bool _isApplyingSettings;
 
         public void OnLoad(UpdateSystem updateSystem)
         {
@@ -30,14 +32,32 @@ namespace MultiSkyLineII
             _localeSource = new MultiplayerLocaleSource(_settings);
             RegisterLocalizationSource();
             _settings.RegisterInOptionsUI();
+            MultiplayerSettingsStorage.Load(_settings, log);
+            if (_settings.Port < 1 || _settings.Port > 65535)
+            {
+                _settings.Port = 25565;
+            }
+            if (string.IsNullOrWhiteSpace(_settings.PlayerName))
+            {
+                _settings.PlayerName = MultiplayerSettings.CreateRandomPlayerName();
+            }
+            MultiplayerSettingsStorage.Save(_settings, log);
             _settings.onSettingsApplied += OnSettingsApplied;
 
             _network = new MultiplayerNetworkService(log, GetLocalState);
             _network.Start(_settings);
-            CreateHudOverlay();
-
             if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
+            {
+                DisplayVersion = ResolveDisplayVersion(asset.path);
                 log.Info($"Current mod asset at {asset.path}");
+                log.Info($"Resolved mod version for HUD: {DisplayVersion}");
+            }
+            else
+            {
+                DisplayVersion = ResolveAssemblyDisplayVersion();
+            }
+
+            CreateHudOverlay();
         }
 
         public void OnDispose()
@@ -60,19 +80,37 @@ namespace MultiSkyLineII
 
         private void OnSettingsApplied(Setting _)
         {
+            if (_isApplyingSettings)
+                return;
+
+            _isApplyingSettings = true;
             log.Info("Settings applied, restarting multiplayer service.");
-            if (_settings.Port < 1 || _settings.Port > 65535)
+            try
             {
-                _settings.Port = 25565;
+                if (_settings.Port < 1 || _settings.Port > 65535)
+                {
+                    _settings.Port = 25565;
+                }
+
+                if (string.IsNullOrWhiteSpace(_settings.PlayerName))
+                {
+                    _settings.PlayerName = MultiplayerSettings.CreateRandomPlayerName();
+                }
+
+                MultiplayerSettingsStorage.Save(_settings, log);
+                _network?.Restart(_settings);
             }
-            _network?.Restart(_settings);
+            finally
+            {
+                _isApplyingSettings = false;
+            }
         }
 
         private MultiplayerResourceState GetLocalState()
         {
             var state = new MultiplayerResourceState
             {
-                Name = ResolveCityName(),
+                Name = ResolvePlayerName(),
                 PingMs = 0,
                 TimestampUtc = DateTime.UtcNow
             };
@@ -81,190 +119,92 @@ namespace MultiSkyLineII
             return state;
         }
 
-        private string ResolveCityName()
+        private string ResolvePlayerName()
         {
-            if (DateTime.UtcNow < _nextCityNameRefreshUtc)
-                return _cachedCityName;
-
-            _nextCityNameRefreshUtc = DateTime.UtcNow.AddSeconds(2);
-            if (TryResolveCityName(out var cityName))
+            var configuredName = _settings?.PlayerName;
+            if (!string.IsNullOrWhiteSpace(configuredName))
             {
-                _cachedCityName = cityName;
+                _cachedPlayerName = configuredName.Trim();
+                return _cachedPlayerName;
             }
 
-            return _cachedCityName;
+            _cachedPlayerName = MultiplayerSettings.CreateRandomPlayerName();
+            if (_settings != null)
+            {
+                _settings.PlayerName = _cachedPlayerName;
+            }
+            return _cachedPlayerName;
         }
 
-        private static bool TryResolveCityName(out string cityName)
+        private static string ResolveDisplayVersion(string assetPath)
         {
-            cityName = null;
-            var manager = GameManager.instance;
-            if (manager == null)
-                return false;
-
-            if (TryReadCityNameFromObject(manager, out cityName))
-                return true;
-
-            var directNodes = new[]
+            try
             {
-                "configuration", "gameSession", "session", "activeGame", "gameMode", "city", "cityData", "save", "saveGame"
-            };
-
-            for (var i = 0; i < directNodes.Length; i++)
-            {
-                var child = GetMemberValue(manager, directNodes[i]);
-                if (child != null && TryReadCityNameFromObject(child, out cityName))
-                    return true;
-            }
-
-            var visited = new HashSet<object>();
-            var objects = new System.Collections.ArrayList { manager };
-            var depths = new System.Collections.ArrayList { 0 };
-            visited.Add(manager);
-
-            for (var cursor = 0; cursor < objects.Count; cursor++)
-            {
-                var obj = objects[cursor];
-                var depth = (int)depths[cursor];
-                if (obj == null || depth > 2)
-                    continue;
-
-                if (TryReadCityNameFromObject(obj, out cityName))
-                    return true;
-
-                var type = obj.GetType();
-                var members = type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                for (var i = 0; i < members.Length; i++)
+                var assemblyDir = Path.GetDirectoryName(assetPath);
+                if (!string.IsNullOrWhiteSpace(assemblyDir))
                 {
-                    object child = null;
-                    switch (members[i])
+                    var parent1 = Directory.GetParent(assemblyDir)?.FullName;
+                    var parent2 = Directory.GetParent(parent1 ?? string.Empty)?.FullName;
+                    var candidates = new[]
                     {
-                        case PropertyInfo propertyInfo:
-                            if (!propertyInfo.CanRead || propertyInfo.GetIndexParameters().Length > 0)
-                                continue;
-                            if (propertyInfo.PropertyType.IsPrimitive || propertyInfo.PropertyType.IsEnum || propertyInfo.PropertyType == typeof(string))
-                                continue;
-                            try { child = propertyInfo.GetValue(obj); } catch { }
-                            break;
-                        case FieldInfo fieldInfo:
-                            if (fieldInfo.FieldType.IsPrimitive || fieldInfo.FieldType.IsEnum || fieldInfo.FieldType == typeof(string))
-                                continue;
-                            try { child = fieldInfo.GetValue(obj); } catch { }
-                            break;
+                        Path.Combine(assemblyDir, "PublishConfiguration.xml"),
+                        Path.Combine(assemblyDir, "Properties", "PublishConfiguration.xml"),
+                        string.IsNullOrWhiteSpace(parent1) ? null : Path.Combine(parent1, "Properties", "PublishConfiguration.xml"),
+                        string.IsNullOrWhiteSpace(parent2) ? null : Path.Combine(parent2, "Properties", "PublishConfiguration.xml")
+                    };
+
+                    for (var i = 0; i < candidates.Length; i++)
+                    {
+                        var file = candidates[i];
+                        if (TryReadModVersionFromFile(file, out var version))
+                            return version;
                     }
-
-                    if (child == null || visited.Contains(child))
-                        continue;
-
-                    visited.Add(child);
-                    objects.Add(child);
-                    depths.Add(depth + 1);
                 }
+
+                var localLowModsFile = Path.Combine(Application.persistentDataPath, "Mods", "MultiSkyLineII", "PublishConfiguration.xml");
+                if (TryReadModVersionFromFile(localLowModsFile, out var deployedVersion))
+                    return deployedVersion;
+            }
+            catch
+            {
             }
 
-            return false;
+            return ResolveAssemblyDisplayVersion();
         }
 
-        private static bool TryReadCityNameFromObject(object target, out string cityName)
+        private static bool TryReadModVersionFromFile(string file, out string version)
         {
-            cityName = null;
-            if (target == null)
+            version = null;
+            if (string.IsNullOrWhiteSpace(file) || !File.Exists(file))
                 return false;
 
-            var directNames = new[]
+            try
             {
-                "cityName", "CityName", "city_name", "saveName", "SaveName", "displayName", "DisplayName", "name", "Name"
-            };
+                var doc = XDocument.Load(file);
+                var value = doc.Root?.Element("ModVersion")?.Attribute("Value")?.Value;
+                if (string.IsNullOrWhiteSpace(value))
+                    return false;
 
-            for (var i = 0; i < directNames.Length; i++)
-            {
-                var value = GetMemberValue(target, directNames[i]) as string;
-                if (IsValidCityName(value, directNames[i]))
-                {
-                    cityName = value.Trim();
-                    return true;
-                }
-            }
-
-            var type = target.GetType();
-            var members = type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-            for (var i = 0; i < members.Length; i++)
-            {
-                string name = null;
-                string value = null;
-
-                switch (members[i])
-                {
-                    case PropertyInfo propertyInfo:
-                        if (propertyInfo.PropertyType != typeof(string) || !propertyInfo.CanRead || propertyInfo.GetIndexParameters().Length > 0)
-                            continue;
-                        name = propertyInfo.Name;
-                        try { value = propertyInfo.GetValue(target) as string; } catch { }
-                        break;
-                    case FieldInfo fieldInfo:
-                        if (fieldInfo.FieldType != typeof(string))
-                            continue;
-                        name = fieldInfo.Name;
-                        try { value = fieldInfo.GetValue(target) as string; } catch { }
-                        break;
-                }
-
-                if (IsValidCityName(value, name))
-                {
-                    cityName = value.Trim();
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static object GetMemberValue(object target, string memberName)
-        {
-            if (target == null || string.IsNullOrWhiteSpace(memberName))
-                return null;
-
-            var type = target.GetType();
-            const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
-
-            var propertyInfo = type.GetProperty(memberName, Flags);
-            if (propertyInfo != null && propertyInfo.CanRead && propertyInfo.GetIndexParameters().Length == 0)
-            {
-                try { return propertyInfo.GetValue(target); } catch { }
-            }
-
-            var fieldInfo = type.GetField(memberName, Flags);
-            if (fieldInfo != null)
-            {
-                try { return fieldInfo.GetValue(target); } catch { }
-            }
-
-            return null;
-        }
-
-        private static bool IsValidCityName(string value, string sourceMember)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                return false;
-
-            var trimmed = value.Trim();
-            if (trimmed.Length < 2 || trimmed.Length > 80)
-                return false;
-
-            if (trimmed.Contains("\\") || trimmed.Contains("/") || trimmed.Contains(":"))
-                return false;
-
-            var member = sourceMember ?? string.Empty;
-            var lowerMember = member.ToLowerInvariant();
-            if (lowerMember.Contains("cityname") || lowerMember.Contains("city_name") || lowerMember.Contains("savename"))
+                version = value.Trim();
                 return true;
-
-            if (lowerMember == "name" || lowerMember == "displayname")
+            }
+            catch
             {
-                return trimmed.IndexOf("city", StringComparison.OrdinalIgnoreCase) >= 0 || trimmed.Length >= 3;
+                return false;
+            }
+        }
+
+        private static string ResolveAssemblyDisplayVersion()
+        {
+            var assembly = typeof(Mod).Assembly;
+            var infoVersion = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            if (!string.IsNullOrWhiteSpace(infoVersion))
+            {
+                var plusIndex = infoVersion.IndexOf('+');
+                return plusIndex > 0 ? infoVersion.Substring(0, plusIndex) : infoVersion;
             }
 
-            return false;
+            return assembly.GetName().Version?.ToString() ?? "1.0.0";
         }
 
         private void RegisterLocalizationSource()

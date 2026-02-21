@@ -20,6 +20,7 @@ namespace MultiSkyLineII
             AddOption(settings, nameof(MultiplayerSettings.BindAddress), "Bind Address", "IP address used by the host listener.");
             AddOption(settings, nameof(MultiplayerSettings.ServerAddress), "Server Address", "Host IP address to connect to as client.");
             AddOption(settings, nameof(MultiplayerSettings.Port), "Port", "TCP port used by host and client.");
+            AddOption(settings, nameof(MultiplayerSettings.PlayerName), "Player Name", "Displayed multiplayer name.");
         }
 
         public IEnumerable<KeyValuePair<string, string>> ReadEntries(IList<IDictionaryEntryError> errors, Dictionary<string, int> indexCounts)

@@ -62,6 +62,17 @@
     <ItemGroup>
         <None Include="$(ModPropsFile)" Link="Properties\Mod.props"/>
         <None Include="$(ModTargetsFile)" Link="Properties\Mod.targets"/>
+        <Content Include="Properties\PublishConfiguration.xml">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            <Link>PublishConfiguration.xml</Link>
+        </Content>
+    </ItemGroup>
+
+    <ItemGroup>
+        <Compile Remove="Tools\**\*.cs"/>
+        <EmbeddedResource Remove="Tools\**\*"/>
+        <None Remove="Tools\**\*"/>
     </ItemGroup>
 
     <Target Name="CheckEntityPackagePath" BeforeTargets="BeforeBuild" Condition="'$(NeedBuild)'">
