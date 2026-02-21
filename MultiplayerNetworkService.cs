@@ -29,12 +29,14 @@ namespace MultiSkyLineII
         private readonly Dictionary<string, int> _moneyAdjustments = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, ResourceDelta> _resourceAdjustments = new Dictionary<string, ResourceDelta>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentQueue<string> _outboundMessages = new ConcurrentQueue<string>();
+        private readonly List<string> _debugLog = new List<string>();
         private MultiplayerResourceState? _authoritativeLocalState;
         private DateTime _nextSettlementUtc = DateTime.UtcNow;
         private const int ProposalTimeoutSeconds = 120;
         private string _configuredBindAddress = "0.0.0.0";
         private string _configuredServerAddress = "127.0.0.1";
         private int _configuredPort = 25565;
+        private const int MaxDebugLogEntries = 300;
 
         private struct ResourceDelta
         {
@@ -57,6 +59,34 @@ namespace MultiSkyLineII
             ? $"{_configuredBindAddress}:{_configuredPort}"
             : $"{_configuredServerAddress}:{_configuredPort}";
 
+        public IReadOnlyList<string> GetDebugLogLines()
+        {
+            lock (_sync)
+            {
+                return _debugLog.ToList();
+            }
+        }
+
+        public void ClearDebugLog()
+        {
+            lock (_sync)
+            {
+                _debugLog.Clear();
+            }
+        }
+
+        private void AddDebugLog(string message)
+        {
+            lock (_sync)
+            {
+                _debugLog.Add($"[{DateTime.Now:HH:mm:ss}] {message}");
+                if (_debugLog.Count > MaxDebugLogEntries)
+                {
+                    _debugLog.RemoveAt(0);
+                }
+            }
+        }
+
         public MultiplayerNetworkService(ILog log, Func<MultiplayerResourceState> localStateProvider)
         {
             _log = log;
@@ -74,12 +104,14 @@ namespace MultiSkyLineII
             if (!settings.NetworkEnabled)
             {
                 _log.Info("Multiplayer disabled in settings.");
+                AddDebugLog("Network disabled by settings.");
                 return;
             }
 
             if (settings.Port < 1 || settings.Port > 65535)
             {
                 _log.Error($"Invalid port {settings.Port}. Expected 1..65535.");
+                AddDebugLog($"Invalid port: {settings.Port}");
                 return;
             }
 
@@ -95,23 +127,27 @@ namespace MultiSkyLineII
                  string.Equals(settings.ServerAddress, "localhost", StringComparison.OrdinalIgnoreCase)))
             {
                 _log.Warn("Client mode is targeting localhost. Use the host machine IP for remote multiplayer.");
+                AddDebugLog("Warning: client targets localhost.");
             }
 
             if (settings.HostMode &&
                 string.Equals(settings.BindAddress, "127.0.0.1", StringComparison.OrdinalIgnoreCase))
             {
                 _log.Warn("Host bind address is 127.0.0.1 (local only). Use 0.0.0.0 for LAN/WAN clients.");
+                AddDebugLog("Warning: host bind is localhost only.");
             }
 
             if (settings.HostMode)
             {
-                Task.Run(() => RunHostLoop(settings.BindAddress, settings.Port, token), token);
-                _log.Info($"Multiplayer host started on {settings.BindAddress}:{settings.Port}");
+                Task.Run(() => RunHostLoop(_configuredBindAddress, _configuredPort, token), token);
+                _log.Info($"Multiplayer host started on {_configuredBindAddress}:{_configuredPort}");
+                AddDebugLog($"Host started on {_configuredBindAddress}:{_configuredPort}");
             }
             else
             {
-                Task.Run(() => RunClientLoop(settings.ServerAddress, settings.Port, token), token);
-                _log.Info($"Multiplayer client started for {settings.ServerAddress}:{settings.Port}");
+                Task.Run(() => RunClientLoop(_configuredServerAddress, _configuredPort, token), token);
+                _log.Info($"Multiplayer client started for {_configuredServerAddress}:{_configuredPort}");
+                AddDebugLog($"Client started for {_configuredServerAddress}:{_configuredPort}");
             }
         }
 
@@ -171,6 +207,7 @@ namespace MultiSkyLineII
                 _authoritativeLocalState = null;
                 while (_outboundMessages.TryDequeue(out _)) { }
                 IsHost = false;
+                AddDebugLog("Network stopped.");
             }
         }
 
@@ -180,6 +217,7 @@ namespace MultiSkyLineII
             if (!IPAddress.TryParse(bindAddress, out ip))
             {
                 _log.Error($"Invalid host bind address: {bindAddress}");
+                AddDebugLog($"Host loop aborted: invalid bind {bindAddress}");
                 return;
             }
 
@@ -192,6 +230,7 @@ namespace MultiSkyLineII
                 {
                     var accepted = await _listener.AcceptTcpClientAsync().ConfigureAwait(false);
                     _log.Info("Client connected to host.");
+                    AddDebugLog($"Peer connected: {accepted.Client.RemoteEndPoint}");
                     lock (_sync)
                     {
                         _hostClients.Add(accepted);
@@ -208,6 +247,7 @@ namespace MultiSkyLineII
                 if (!token.IsCancellationRequested)
                 {
                     _log.Error($"Host loop crashed: {e}");
+                    AddDebugLog($"Host loop error: {e.Message}");
                 }
             }
         }
@@ -220,16 +260,27 @@ namespace MultiSkyLineII
                 try
                 {
                     client = new TcpClient();
+                    AddDebugLog($"Client connecting to {serverAddress}:{port}...");
                     await client.ConnectAsync(serverAddress, port).ConfigureAwait(false);
                     _log.Info("Connected to host.");
+                    AddDebugLog($"Client connected to {serverAddress}:{port}");
                     ReplaceClient(client);
                     await HandleConnectedClient(client, token).ConfigureAwait(false);
+                }
+                catch (SocketException e)
+                {
+                    if (!token.IsCancellationRequested)
+                    {
+                        _log.Warn($"Connection failed ({serverAddress}:{port}) [{e.SocketErrorCode}]: {e.Message}");
+                        AddDebugLog($"Connect failed {serverAddress}:{port} [{e.SocketErrorCode}] - {e.Message}");
+                    }
                 }
                 catch (Exception e)
                 {
                     if (!token.IsCancellationRequested)
                     {
                         _log.Warn($"Connection failed ({serverAddress}:{port}): {e.Message}");
+                        AddDebugLog($"Connect failed {serverAddress}:{port} - {e.Message}");
                     }
                 }
                 finally
@@ -259,11 +310,13 @@ namespace MultiSkyLineII
             var currentRttMs = -1;
             try
             {
+                AddDebugLog($"Session start with {client.Client.RemoteEndPoint}");
                 using (var stream = client.GetStream())
                 using (var reader = new StreamReader(stream, Encoding.UTF8, false, 1024, true))
                 using (var writer = new StreamWriter(stream, Encoding.UTF8, 1024, true) { AutoFlush = true })
                 {
                     await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                    AddDebugLog("TX STATE (initial)");
                     Task<string> pendingReadTask = null;
                     var nextSyncUtc = DateTime.UtcNow;
 
@@ -284,6 +337,7 @@ namespace MultiSkyLineII
                             if (line == null)
                             {
                                 _log.Info("Peer disconnected.");
+                                AddDebugLog("Peer disconnected (EOF).");
                                 break;
                             }
 
@@ -304,6 +358,7 @@ namespace MultiSkyLineII
                                 remote.Name = NormalizePlayerName(remote.Name);
                                 remoteName = remote.Name;
                                 remote.PingMs = currentRttMs;
+                                AddDebugLog($"RX STATE from {remote.Name} pop={remote.Population} money={remote.Money}");
                                 lock (_sync)
                                 {
                                     _remoteStates[remote.Name] = remote;
@@ -311,6 +366,7 @@ namespace MultiSkyLineII
                             }
                             else if (TryParseSnapshot(line, out var snapshotStates))
                             {
+                                AddDebugLog($"RX LIST snapshot entries={snapshotStates.Count}");
                                 lock (_sync)
                                 {
                                     _remoteStates.Clear();
@@ -337,6 +393,7 @@ namespace MultiSkyLineII
                             }
                             else if (TryParseContracts(line, out var contracts))
                             {
+                                AddDebugLog($"RX CONTRACTS count={contracts.Count}");
                                 lock (_sync)
                                 {
                                     _contracts.Clear();
@@ -345,6 +402,7 @@ namespace MultiSkyLineII
                             }
                             else if (TryParseProposals(line, out var proposals))
                             {
+                                AddDebugLog($"RX PROPOSALS count={proposals.Count}");
                                 lock (_sync)
                                 {
                                     _pendingProposals.Clear();
@@ -353,6 +411,7 @@ namespace MultiSkyLineII
                             }
                             else if (IsHost && TryParseContractRequest(line, out var proposal))
                             {
+                                AddDebugLog($"RX CONTRACTREQ seller={proposal.SellerPlayer} buyer={proposal.BuyerPlayer} units={proposal.UnitsPerTick}");
                                 lock (_sync)
                                 {
                                     if (TryGetStateByPlayer(proposal.SellerPlayer, out var sellerState) &&
@@ -374,6 +433,7 @@ namespace MultiSkyLineII
                             }
                             else if (IsHost && TryParseContractDecision(line, out var decision))
                             {
+                                AddDebugLog($"RX CONTRACTDECISION id={decision.ProposalId} actor={decision.ActorCity} accept={decision.Accept}");
                                 lock (_sync)
                                 {
                                     if (!TryApplyProposalDecision(decision.ProposalId, decision.ActorCity, decision.Accept, out var decisionError))
@@ -392,16 +452,19 @@ namespace MultiSkyLineII
                             var pingId = ++pingSequence;
                             pendingPings[pingId] = DateTime.UtcNow;
                             await writer.WriteLineAsync(SerializePingRequest(pingId)).ConfigureAwait(false);
+                            AddDebugLog($"TX PINGREQ id={pingId}");
 
                             if (IsHost)
                             {
                                 await writer.WriteLineAsync(SerializeSnapshot()).ConfigureAwait(false);
                                 await writer.WriteLineAsync(SerializeContracts()).ConfigureAwait(false);
                                 await writer.WriteLineAsync(SerializeProposals()).ConfigureAwait(false);
+                                AddDebugLog("TX LIST/CONTRACTS/PROPOSALS");
                             }
                             else
                             {
                                 await writer.WriteLineAsync(SerializeState(_localStateProvider())).ConfigureAwait(false);
+                                AddDebugLog("TX STATE (periodic)");
                             }
 
                             nextSyncUtc = DateTime.UtcNow.AddSeconds(2);
@@ -420,6 +483,7 @@ namespace MultiSkyLineII
                 if (!token.IsCancellationRequested)
                 {
                     _log.Info($"Peer socket closed: {e.Message}");
+                    AddDebugLog($"Peer socket closed: {e.Message}");
                 }
             }
             catch (SocketException e)
@@ -427,6 +491,7 @@ namespace MultiSkyLineII
                 if (!token.IsCancellationRequested)
                 {
                     _log.Info($"Peer socket error: {e.Message}");
+                    AddDebugLog($"Peer socket error: {e.Message}");
                 }
             }
             catch (Exception e)
@@ -434,10 +499,12 @@ namespace MultiSkyLineII
                 if (!token.IsCancellationRequested)
                 {
                     _log.Warn($"Client handler crashed: {e.Message}");
+                    AddDebugLog($"Handler error: {e.Message}");
                 }
             }
             finally
             {
+                AddDebugLog("Session end.");
                 lock (_sync)
                 {
                     if (IsHost)
@@ -518,11 +585,13 @@ namespace MultiSkyLineII
             {
                 lock (_sync)
                 {
+                    AddDebugLog($"Local decision proposal={proposalId} accept={accept}");
                     return TryApplyProposalDecision(proposalId, actorCity, accept, out error);
                 }
             }
 
             _outboundMessages.Enqueue(SerializeContractDecision(proposalId, actorCity, accept));
+            AddDebugLog($"Queued CONTRACTDECISION proposal={proposalId} actor={actorCity} accept={accept}");
             return true;
         }
 
@@ -579,6 +648,7 @@ namespace MultiSkyLineII
                         CreatedUtc = now
                     };
                     _pendingProposals.Add(proposal);
+                    AddDebugLog($"Local proposal queued seller={proposal.SellerPlayer} buyer={proposal.BuyerPlayer} units={proposal.UnitsPerTick}");
                 }
 
                 return true;
@@ -586,6 +656,7 @@ namespace MultiSkyLineII
 
             var request = SerializeContractRequest(sellerPlayer, buyerPlayer, resource, unitsPerTick, pricePerUnit, durationSeconds);
             _outboundMessages.Enqueue(request);
+            AddDebugLog($"Queued CONTRACTREQ seller={sellerPlayer} buyer={buyerPlayer} units={unitsPerTick}");
             return true;
         }
 
@@ -976,7 +1047,10 @@ namespace MultiSkyLineII
 
             _pendingProposals.RemoveAt(index);
             if (!accept)
+            {
+                AddDebugLog($"Proposal {proposalId} refused by {actorCity}");
                 return true;
+            }
 
             if (!TryGetStateByPlayer(proposal.SellerPlayer, out _) || !TryGetStateByPlayer(proposal.BuyerPlayer, out _))
             {
@@ -995,6 +1069,7 @@ namespace MultiSkyLineII
                 DurationSeconds = proposal.DurationSeconds,
                 CreatedUtc = DateTime.UtcNow
             });
+            AddDebugLog($"Proposal {proposalId} accepted by {actorCity}, contract active.");
 
             return true;
         }
@@ -1087,6 +1162,7 @@ namespace MultiSkyLineII
                 var payment = transferUnits * contract.PricePerUnit;
                 seller.Money += payment;
                 buyer.Money -= payment;
+                AddDebugLog($"Settlement {contract.SellerPlayer}->{contract.BuyerPlayer} res={contract.Resource} units={transferUnits} payment={payment}");
 
                 ApplyResourceTransfer(contract.Resource, ref seller, ref buyer, transferUnits);
                 AddMoneyAdjustment(contract.SellerPlayer, payment);

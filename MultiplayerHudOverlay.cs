@@ -31,6 +31,8 @@ namespace MultiSkyLineII
         private string _proposalFeedback;
         private DateTime _proposalFeedbackUntilUtc;
         private string _windowTitle = "MultiSkyLineII Multiplayer";
+        private int _activeTab;
+        private Vector2 _debugScrollPosition;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -144,10 +146,25 @@ namespace MultiSkyLineII
             GUI.Label(new Rect(16f, 36f, 280f, 22f), "Session Multiplayer", _titleStyle);
             GUI.Label(new Rect(_windowRect.width - 170f, 40f, 150f, 18f), $"Mode: {modeText}", _metaStyle);
             GUI.Label(new Rect(16f, 56f, _windowRect.width - 32f, 16f), $"Destination: {destinationText}", _smallStyle);
+            if (GUI.Button(new Rect(16f, 72f, 72f, 20f), "Vue"))
+            {
+                _activeTab = 0;
+            }
+            if (GUI.Button(new Rect(92f, 72f, 72f, 20f), "Debug"))
+            {
+                _activeTab = 1;
+            }
 
-            var contentTop = 78f;
+            var contentTop = 96f;
             var viewWidth = _windowRect.width - 40f;
             var viewHeight = Mathf.Max(150f, _windowRect.height - 90f);
+            if (_activeTab == 1)
+            {
+                DrawDebugTab(contentTop, viewWidth, viewHeight);
+                GUI.DragWindow(new Rect(0f, 0f, _windowRect.width - 34f, 26f));
+                return;
+            }
+
             var statesHeight = Mathf.Max(112f, states.Count * 112f);
             var contractsHeight = Mathf.Max(84f, activeContracts.Count * 22f + 34f);
             var pendingHeight = Mathf.Max(84f, pendingProposals.Count * 26f + 34f);
@@ -178,6 +195,34 @@ namespace MultiSkyLineII
             GUI.EndScrollView();
 
             GUI.DragWindow(new Rect(0f, 0f, _windowRect.width - 34f, 26f));
+        }
+
+        private void DrawDebugTab(float contentTop, float viewWidth, float viewHeight)
+        {
+            var logs = _networkService.GetDebugLogLines();
+            if (GUI.Button(new Rect(_windowRect.width - 96f, 72f, 80f, 20f), "Clear"))
+            {
+                _networkService.ClearDebugLog();
+            }
+
+            var viewRect = new Rect(16f, contentTop, viewWidth, viewHeight);
+            var contentHeight = Mathf.Max(viewHeight, logs.Count * 18f + 12f);
+            var contentRect = new Rect(0f, 0f, viewWidth - 20f, contentHeight);
+            _debugScrollPosition = GUI.BeginScrollView(viewRect, _debugScrollPosition, contentRect, false, true);
+            if (logs.Count == 0)
+            {
+                GUI.Label(new Rect(8f, 8f, contentRect.width - 16f, 18f), "Aucun log reseau.", _smallStyle);
+            }
+            else
+            {
+                var y = 0f;
+                for (var i = 0; i < logs.Count; i++)
+                {
+                    GUI.Label(new Rect(8f, y, contentRect.width - 16f, 18f), logs[i], _smallStyle);
+                    y += 18f;
+                }
+            }
+            GUI.EndScrollView();
         }
 
         private void DrawContractsSection(System.Collections.Generic.IReadOnlyList<MultiplayerContract> contracts, float y, float width)
