@@ -11,6 +11,10 @@ namespace MultiSkyLineII
         public bool NetworkEnabled { get; set; }
 
         [SettingsUISection("General")]
+        [SettingsUITextInput]
+        public string CityName { get; set; }
+
+        [SettingsUISection("General")]
         public bool HostMode { get; set; }
 
         [SettingsUISection("Host")]
@@ -33,6 +37,7 @@ namespace MultiSkyLineII
         public override void SetDefaults()
         {
             NetworkEnabled = false;
+            CityName = "My City";
             HostMode = true;
             BindAddress = "0.0.0.0";
             ServerAddress = "127.0.0.1";

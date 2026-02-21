@@ -27,6 +27,12 @@
         <Reference Include="UnityEngine.CoreModule">
             <Private>false</Private>
         </Reference>
+        <Reference Include="UnityEngine.IMGUIModule">
+            <Private>false</Private>
+        </Reference>
+        <Reference Include="UnityEngine.InputLegacyModule">
+            <Private>false</Private>
+        </Reference>
         <Reference Include="Unity.Burst">
             <Private>false</Private>
         </Reference>
@@ -57,5 +63,65 @@
         <None Include="$(ModPropsFile)" Link="Properties\Mod.props"/>
         <None Include="$(ModTargetsFile)" Link="Properties\Mod.targets"/>
     </ItemGroup>
+
+    <Target Name="CheckEntityPackagePath" BeforeTargets="BeforeBuild" Condition="'$(NeedBuild)'">
+        <ItemGroup>
+            <Generators Include="$(EntityPackagePath)\*.dll"/>
+        </ItemGroup>
+        <Warning Condition="'@(Generators)'==''"
+                 Text="Unity.Entities source generators not found at '$(EntityPackagePath)'. Build will continue without them. Regenerate the modding toolchain package cache from the game to restore analyzers."/>
+    </Target>
+
+    <PropertyGroup Condition="!Exists('$(EntityPackagePath)\SystemGenerator.dll')">
+        <RunAnalyzers>false</RunAnalyzers>
+        <RunAnalyzersDuringBuild>false</RunAnalyzersDuringBuild>
+    </PropertyGroup>
+
+    <ItemGroup Condition="!Exists('$(EntityPackagePath)\SystemGenerator.dll')">
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.SystemAPI.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.SystemAPI.QueryBuilder.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.LambdaJobs.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.Common.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.SystemAPI.Query.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\SystemGenerator.EntityQueryBulkOperations.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\AspectGenerator.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\Common.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\JobEntityGenerator.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\Unity.Entities.Analyzer.dll"/>
+        <Analyzer Remove="$(EntityPackagePath)\Unity.Entities.Analyzer.CodeFixes.dll"/>
+    </ItemGroup>
+
+    <PropertyGroup>
+        <DotNet6RuntimeMarker>C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.0</DotNet6RuntimeMarker>
+    </PropertyGroup>
+
+    <Target Name="RunModPostProcessor" AfterTargets="AfterBuild" Condition="'$(NeedBuild)'">
+        <Error Condition="!Exists('$(ModPostProcessorFullPath)')" Text="Post processor not found, please check the path: $(ModPostProcessorFullPath)"/>
+        <Warning Condition="!Exists('$(DotNet6RuntimeMarker)')" Text="Skipping ModPostProcessor because .NET 6 runtime is not installed. Install Microsoft.NETCore.App 6.0.x to enable post-processing."/>
+        <Message Condition="Exists('$(DotNet6RuntimeMarker)')" Text="Run post processor: $(ModPostProcessorArgs)" Importance="high"/>
+        <Exec Condition="Exists('$(DotNet6RuntimeMarker)')" Command="$(ModPostProcessorArgs)" LogStandardErrorAsError="true"/>
+    </Target>
+
+    <Target Name="ReadPublishModId" BeforeTargets="RunModPublisher">
+        <XmlPeek XmlInputPath="$(PublishConfigurationFullPath)" Query="/Publish/ModId/@Value">
+            <Output TaskParameter="Result" PropertyName="PublishModId"/>
+        </XmlPeek>
+        <PropertyGroup>
+            <PublishModIdIsNumeric>$([System.Text.RegularExpressions.Regex]::IsMatch('$(PublishModId)', '^[0-9]+$'))</PublishModIdIsNumeric>
+        </PropertyGroup>
+    </Target>
+
+    <Target Name="RunModPublisher" AfterTargets="Publish">
+        <Error Condition="!Exists('$(ModPublisherPath)')" Text="Mod publisher not found, please check the path: $(ModPublisherPath)"/>
+        <Warning Condition="'$(ModPublisherCommand)'=='Update' and '$(PublishModIdIsNumeric)'!='True'"
+                 Text="Skipping ModPublisher Update because ModId is invalid ('$(PublishModId)'). Set a numeric ModId in $(PublishConfigurationFullPath) after first publish."/>
+        <Message Condition="'$(ModPublisherCommand)'!='Update' or '$(PublishModIdIsNumeric)'=='True'"
+                 Text="Run mod publisher: $(ModPublisherArgs)"
+                 Importance="high"/>
+        <Exec Condition="'$(ModPublisherCommand)'!='Update' or '$(PublishModIdIsNumeric)'=='True'"
+              Command="$(ModPublisherArgs)"
+              LogStandardErrorAsError="true"/>
+    </Target>
 
 </Project>
