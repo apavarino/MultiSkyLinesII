@@ -21,12 +21,14 @@ namespace MultiSkyLineII
         private Texture2D _windowBg;
         private Texture2D _cardBg;
         private Texture2D _meterBg;
-        private Texture2D _meterFill;
+        private Texture2D _meterFillGood;
+        private Texture2D _meterFillWarn;
+        private Texture2D _meterFillBad;
         private bool _stylesReady;
         private int _proposalTargetIndex;
         private MultiplayerContractResource _proposalResource = MultiplayerContractResource.Electricity;
         private float _proposalUnits = 5000f;
-        private float _proposalPrice = 3f;
+        private float _proposalPrice = 1000f;
         private string _proposalFeedback;
         private DateTime _proposalFeedbackUntilUtc;
         private string _windowTitle = "MultiSkyLineII Multiplayer";
@@ -73,6 +75,22 @@ namespace MultiSkyLineII
 
             EnsureStyles();
             _windowRect = GUI.Window(WindowId, _windowRect, DrawWindow, $"{_windowTitle} (F8)");
+
+            var evt = Event.current;
+            if (evt == null)
+                return;
+
+            if (!_windowRect.Contains(evt.mousePosition))
+                return;
+
+            // Prevent camera/world interactions while using the HUD.
+            if (evt.type == EventType.ScrollWheel ||
+                evt.type == EventType.MouseDown ||
+                evt.type == EventType.MouseUp ||
+                evt.type == EventType.MouseDrag)
+            {
+                evt.Use();
+            }
         }
 
         private bool IsInGameplay()
@@ -93,7 +111,9 @@ namespace MultiSkyLineII
             _windowBg = CreateSolidTexture(new Color32(16, 22, 31, 230));
             _cardBg = CreateSolidTexture(new Color32(27, 35, 48, 238));
             _meterBg = CreateSolidTexture(new Color32(55, 69, 88, 255));
-            _meterFill = CreateSolidTexture(new Color32(73, 194, 146, 255));
+            _meterFillGood = CreateSolidTexture(new Color32(73, 194, 146, 255));
+            _meterFillWarn = CreateSolidTexture(new Color32(232, 180, 62, 255));
+            _meterFillBad = CreateSolidTexture(new Color32(223, 89, 89, 255));
 
             _windowStyle = new GUIStyle(GUI.skin.window);
             _windowStyle.normal.background = _windowBg;
@@ -172,7 +192,7 @@ namespace MultiSkyLineII
                 return;
             }
 
-            var statesHeight = Mathf.Max(112f, states.Count * 112f);
+            var statesHeight = Mathf.Max(142f, states.Count * 138f);
             var contractsHeight = Mathf.Max(84f, activeContracts.Count * 22f + 34f);
             var pendingHeight = Mathf.Max(84f, pendingProposals.Count * 26f + 34f);
             var proposalHeight = 132f;
@@ -185,7 +205,7 @@ namespace MultiSkyLineII
             for (var i = 0; i < states.Count; i++)
             {
                 DrawStateCard(states[i], y, contentRect.width);
-                y += 108f;
+                y += 138f;
             }
 
             if (states.Count <= 1)
@@ -247,7 +267,7 @@ namespace MultiSkyLineII
             {
                 var c = contracts[i];
                 var resource = GetResourceLabel(c.Resource);
-                GUI.Label(new Rect(12f, lineY, width - 120f, 18f), $"{c.SellerPlayer} -> {c.BuyerPlayer} | {resource} {FormatUnitValue(c.UnitsPerTick)} u/tick | ${c.PricePerUnit}/u", _smallStyle);
+                GUI.Label(new Rect(12f, lineY, width - 120f, 18f), $"{c.SellerPlayer} -> {c.BuyerPlayer} | {resource} {FormatResourceRate(c.Resource, c.UnitsPerTick)} | ${c.PricePerTick}/tick", _smallStyle);
                 var local = _networkService.GetLocalState().Name;
                 if (string.Equals(c.SellerPlayer, local, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(c.BuyerPlayer, local, StringComparison.OrdinalIgnoreCase))
@@ -287,6 +307,19 @@ namespace MultiSkyLineII
                 _proposalTargetIndex = 0;
 
             var selectedTarget = targetNames[_proposalTargetIndex];
+            MultiplayerResourceState sellerState = default;
+            var sellerFound = false;
+            for (var i = 0; i < states.Count; i++)
+            {
+                if (string.Equals(states[i].Name, selectedTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    sellerState = states[i];
+                    sellerFound = true;
+                    break;
+                }
+            }
+
+            var exportMax = sellerFound ? GetExportableUnits(sellerState, _proposalResource) : 0;
             if (GUI.Button(new Rect(12f, y + 30f, 210f, 22f), $"Acheter a: {selectedTarget}"))
             {
                 _proposalTargetIndex = (_proposalTargetIndex + 1) % targetNames.Count;
@@ -297,21 +330,30 @@ namespace MultiSkyLineII
                 _proposalResource = (MultiplayerContractResource)(((int)_proposalResource + 1) % 3);
             }
 
-            GUI.Label(new Rect(12f, y + 58f, 220f, 16f), $"Quantite/tick: {FormatUnitValue(Mathf.RoundToInt(_proposalUnits))} u", _smallStyle);
-            _proposalUnits = GUI.HorizontalSlider(new Rect(125f, y + 62f, 220f, 14f), _proposalUnits, 10f, 100000f);
+            var sliderMax = Mathf.Max(1, exportMax);
+            _proposalUnits = Mathf.Clamp(_proposalUnits, 1f, sliderMax);
+            GUI.Label(new Rect(12f, y + 58f, 320f, 16f), $"Quantite/tick: {FormatResourceRate(_proposalResource, Mathf.RoundToInt(_proposalUnits))} (max {FormatResourceRate(_proposalResource, exportMax)})", _smallStyle);
+            _proposalUnits = GUI.HorizontalSlider(new Rect(125f, y + 62f, 220f, 14f), _proposalUnits, 1f, sliderMax);
 
-            GUI.Label(new Rect(12f, y + 80f, 150f, 16f), $"Prix/unite: ${(int)_proposalPrice}", _smallStyle);
-            _proposalPrice = GUI.HorizontalSlider(new Rect(125f, y + 84f, 220f, 14f), _proposalPrice, 1f, 50f);
+            GUI.Label(new Rect(12f, y + 80f, 170f, 16f), $"Prix/tick: ${(int)_proposalPrice}", _smallStyle);
+            _proposalPrice = GUI.HorizontalSlider(new Rect(125f, y + 84f, 220f, 14f), _proposalPrice, 1f, 10000f);
 
             GUI.Label(new Rect(12f, y + 102f, width - 220f, 16f), "Contrat indefini (annulation manuelle).", _smallStyle);
             if (GUI.Button(new Rect(width - 156f, y + 98f, 140f, 22f), "Envoyer contrat"))
             {
+                if (exportMax <= 0)
+                {
+                    _proposalFeedback = "Export impossible: surplus nul.";
+                    _proposalFeedbackUntilUtc = DateTime.UtcNow.AddSeconds(3);
+                    return;
+                }
+
                 var ok = _networkService.TryProposeContract(
                     sellerPlayer: selectedTarget,
                     buyerPlayer: local.Name,
                     resource: _proposalResource,
                     unitsPerTick: Mathf.RoundToInt(_proposalUnits),
-                    pricePerUnit: Mathf.RoundToInt(_proposalPrice),
+                    pricePerTick: Mathf.RoundToInt(_proposalPrice),
                     out var error);
 
                 _proposalFeedback = ok ? "Demande envoyee." : $"Erreur: {error}";
@@ -341,7 +383,7 @@ namespace MultiSkyLineII
                 var p = proposals[i];
                 var resource = GetResourceLabel(p.Resource);
                 var expiresIn = Mathf.Max(0, 120 - (int)(DateTime.UtcNow - p.CreatedUtc).TotalSeconds);
-                GUI.Label(new Rect(12f, lineY, width - 200f, 18f), $"{p.BuyerPlayer} demande {resource} {FormatUnitValue(p.UnitsPerTick)} u/tick a {p.SellerPlayer} | ${p.PricePerUnit}/u | {expiresIn}s", _smallStyle);
+                GUI.Label(new Rect(12f, lineY, width - 200f, 18f), $"{p.BuyerPlayer} demande {resource} {FormatResourceRate(p.Resource, p.UnitsPerTick)} a {p.SellerPlayer} | ${p.PricePerTick}/tick | {expiresIn}s", _smallStyle);
 
                 if (string.Equals(p.SellerPlayer, local.Name, StringComparison.OrdinalIgnoreCase))
                 {
@@ -381,33 +423,103 @@ namespace MultiSkyLineII
 
         private void DrawStateCard(MultiplayerResourceState s, float y, float width)
         {
-            GUI.Box(new Rect(4f, y, width - 8f, 96f), GUIContent.none, _cardStyle);
+            GUI.Box(new Rect(4f, y, width - 8f, 128f), GUIContent.none, _cardStyle);
 
             var pingText = s.PingMs >= 0 ? $"{s.PingMs} ms" : "n/a";
             GUI.Label(new Rect(14f, y + 8f, 240f, 20f), s.Name, _nameStyle);
             GUI.Label(new Rect(width - 120f, y + 10f, 100f, 18f), $"Ping {pingText}", _metaStyle);
             GUI.Label(new Rect(14f, y + 28f, width - 30f, 18f), $"Population {s.Population:N0}   -   Budget ${s.Money:N0}", _textStyle);
+            var speedText = s.IsPaused ? "Pause" : (s.SimulationSpeed > 0 ? $"x{s.SimulationSpeed}" : "n/a");
+            var dateText = string.IsNullOrWhiteSpace(s.SimulationDateText) ? "n/a" : s.SimulationDateText;
+            GUI.Label(new Rect(14f, y + 44f, width - 30f, 16f), $"Simulation {speedText}   -   Date {dateText}", _smallStyle);
+            GUI.Label(new Rect(14f, y + 58f, width - 30f, 16f),
+                $"Frontieres distinctes -> Electricite: {(s.HasElectricityOutsideConnection ? "OK" : "KO")} | Eau: {(s.HasWaterOutsideConnection ? "OK" : "KO")} | Eaux usees: {(s.HasSewageOutsideConnection ? "OK" : "KO")}",
+                _smallStyle);
 
-            DrawMeter("Electricite", s.ElectricityFulfilledConsumption, s.ElectricityConsumption, s.ElectricityProduction, "prod", y + 50f, width);
-            DrawMeter("Eau", s.FreshWaterFulfilledConsumption, s.FreshWaterConsumption, s.FreshWaterCapacity, "cap", y + 66f, width);
-            DrawMeter("Eaux usees", s.SewageFulfilledConsumption, s.SewageConsumption, s.SewageCapacity, "cap", y + 82f, width);
+            DrawMeter("Electricite", MultiplayerContractResource.Electricity, s.ElectricityFulfilledConsumption, s.ElectricityConsumption, s.ElectricityProduction, "prod", y + 76f, width);
+            DrawMeter("Eau", MultiplayerContractResource.FreshWater, s.FreshWaterFulfilledConsumption, s.FreshWaterConsumption, s.FreshWaterCapacity, "cap", y + 92f, width);
+            DrawMeter("Eaux usees", MultiplayerContractResource.Sewage, s.SewageFulfilledConsumption, s.SewageConsumption, s.SewageCapacity, "cap", y + 108f, width);
         }
 
-        private void DrawMeter(string label, int fulfilled, int demand, int aux, string auxLabel, float y, float width)
+        private static int GetExportableUnits(MultiplayerResourceState s, MultiplayerContractResource resource)
+        {
+            switch (resource)
+            {
+                case MultiplayerContractResource.Electricity:
+                    if (!s.HasElectricityOutsideConnection)
+                        return 0;
+                    return Math.Max(0, s.ElectricityProduction - s.ElectricityConsumption);
+                case MultiplayerContractResource.FreshWater:
+                    if (!s.HasWaterOutsideConnection)
+                        return 0;
+                    return Math.Max(0, s.FreshWaterCapacity - s.FreshWaterConsumption);
+                case MultiplayerContractResource.Sewage:
+                    if (!s.HasSewageOutsideConnection)
+                        return 0;
+                    return Math.Max(0, s.SewageCapacity - s.SewageConsumption);
+                default:
+                    return 0;
+            }
+        }
+
+        private void DrawMeter(string label, MultiplayerContractResource resource, int fulfilled, int demand, int aux, string auxLabel, float y, float width)
         {
             var left = 14f;
             var meterX = 102f;
-            var meterWidth = width - 230f;
+            var meterWidth = width - 318f;
             var meterHeight = 10f;
-            var ratio = demand <= 0 ? 1f : Mathf.Clamp01((float)fulfilled / demand);
+            var supply = Math.Max(0, aux);
+            var consumption = Math.Max(0, demand);
+            var served = Math.Max(0, fulfilled);
+            var sellable = Math.Max(0, supply - consumption);
+            var load = supply <= 0 ? 1f : (float)consumption / supply;
+            var ratio = Mathf.Clamp01(load);
+            var fillTexture = load > 1f || supply <= 0
+                ? _meterFillBad
+                : (load > 0.80f ? _meterFillWarn : _meterFillGood);
 
             GUI.Label(new Rect(left, y - 2f, 84f, 16f), label, _smallStyle);
             GUI.DrawTexture(new Rect(meterX, y, meterWidth, meterHeight), _meterBg);
-            GUI.DrawTexture(new Rect(meterX, y, meterWidth * ratio, meterHeight), _meterFill);
-            GUI.Label(new Rect(meterX + meterWidth + 8f, y - 2f, 180f, 16f), $"{FormatUnitValue(fulfilled)}/{FormatUnitValue(demand)} u ({auxLabel} {FormatUnitValue(aux)} u)", _smallStyle);
+            GUI.DrawTexture(new Rect(meterX, y, meterWidth * ratio, meterHeight), fillTexture);
+            GUI.Label(
+                new Rect(meterX + meterWidth + 8f, y - 2f, 300f, 16f),
+                $"{auxLabel} {FormatResourceAmount(resource, supply)} | conso {FormatResourceAmount(resource, consumption)} | vendable {FormatResourceAmount(resource, sellable)} | servi {FormatResourceAmount(resource, served)}",
+                _smallStyle);
         }
 
-        private static string FormatUnitValue(int value)
+        private static string FormatResourceRate(MultiplayerContractResource resource, int valuePerTick)
+        {
+            return $"{FormatResourceAmount(resource, valuePerTick)}/tick";
+        }
+
+        private static string FormatResourceAmount(MultiplayerContractResource resource, int value)
+        {
+            switch (resource)
+            {
+                case MultiplayerContractResource.Electricity:
+                    return FormatElectricity(value);
+                case MultiplayerContractResource.FreshWater:
+                case MultiplayerContractResource.Sewage:
+                    return $"{FormatCompact(value)} m3";
+                default:
+                    return FormatCompact(value);
+            }
+        }
+
+        private static string FormatElectricity(int value)
+        {
+            // CS2 electricity stats are in deci-kW (x10). Convert to kW first, then to MW/GW.
+            var kw = value / 10f;
+            var mw = kw / 1000f;
+            var absMw = Math.Abs(mw);
+            if (absMw >= 1000f)
+                return $"{mw / 1000f:0.##} GW";
+            if (absMw >= 1f)
+                return $"{mw:0.##} MW";
+            return $"{kw:0.##} kW";
+        }
+
+        private static string FormatCompact(int value)
         {
             var abs = Math.Abs((long)value);
             if (abs >= 1_000_000_000L)
@@ -427,8 +539,12 @@ namespace MultiSkyLineII
                 Destroy(_cardBg);
             if (_meterBg != null)
                 Destroy(_meterBg);
-            if (_meterFill != null)
-                Destroy(_meterFill);
+            if (_meterFillGood != null)
+                Destroy(_meterFillGood);
+            if (_meterFillWarn != null)
+                Destroy(_meterFillWarn);
+            if (_meterFillBad != null)
+                Destroy(_meterFillBad);
         }
     }
 }
