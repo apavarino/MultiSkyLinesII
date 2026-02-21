@@ -25,6 +25,34 @@ namespace MultiSkyLineII
 
     public static class MultiplayerResourceReader
     {
+        public static bool HasActiveCity()
+        {
+            try
+            {
+                var world = World.DefaultGameObjectInjectionWorld;
+                if (world == null)
+                    return false;
+
+                var entityManager = world.EntityManager;
+                var moneyQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<PlayerMoney>());
+                if (!moneyQuery.IsEmptyIgnoreFilter)
+                    return true;
+
+                var populationQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<Population>());
+                if (!populationQuery.IsEmptyIgnoreFilter)
+                    return true;
+
+                if (world.GetExistingSystemManaged<ElectricityStatisticsSystem>() != null)
+                    return true;
+
+                return world.GetExistingSystemManaged<WaterStatisticsSystem>() != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public static bool TryRead(ref MultiplayerResourceState state)
         {
             try
@@ -34,17 +62,20 @@ namespace MultiSkyLineII
                     return false;
 
                 var entityManager = world.EntityManager;
+                var hasData = false;
 
                 var moneyQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<PlayerMoney>());
                 if (!moneyQuery.IsEmptyIgnoreFilter)
                 {
                     state.Money = moneyQuery.GetSingleton<PlayerMoney>().money;
+                    hasData = true;
                 }
 
                 var populationQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<Population>());
                 if (!populationQuery.IsEmptyIgnoreFilter)
                 {
                     state.Population = populationQuery.GetSingleton<Population>().m_Population;
+                    hasData = true;
                 }
 
                 var electricitySystem = world.GetExistingSystemManaged<ElectricityStatisticsSystem>();
@@ -53,6 +84,7 @@ namespace MultiSkyLineII
                     state.ElectricityProduction = electricitySystem.production;
                     state.ElectricityConsumption = electricitySystem.consumption;
                     state.ElectricityFulfilledConsumption = electricitySystem.fulfilledConsumption;
+                    hasData = true;
                 }
 
                 var waterSystem = world.GetExistingSystemManaged<WaterStatisticsSystem>();
@@ -64,9 +96,10 @@ namespace MultiSkyLineII
                     state.SewageCapacity = waterSystem.sewageCapacity;
                     state.SewageConsumption = waterSystem.sewageConsumption;
                     state.SewageFulfilledConsumption = waterSystem.fulfilledSewageConsumption;
+                    hasData = true;
                 }
 
-                return true;
+                return hasData;
             }
             catch
             {

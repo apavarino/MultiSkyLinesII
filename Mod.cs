@@ -4,6 +4,8 @@ using Game.Modding;
 using Game.SceneFlow;
 using Game.Settings;
 using System;
+using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 
 namespace MultiSkyLineII
@@ -17,6 +19,8 @@ namespace MultiSkyLineII
         private MultiplayerLocaleSource _localeSource;
         private string[] _registeredLocales;
         private MultiplayerHudOverlay _hudOverlay;
+        private string _cachedCityName = "Unknown City";
+        private DateTime _nextCityNameRefreshUtc;
 
         public void OnLoad(UpdateSystem updateSystem)
         {
@@ -57,9 +61,9 @@ namespace MultiSkyLineII
         private void OnSettingsApplied(Setting _)
         {
             log.Info("Settings applied, restarting multiplayer service.");
-            if (string.IsNullOrWhiteSpace(_settings.CityName))
+            if (_settings.Port < 1 || _settings.Port > 65535)
             {
-                _settings.CityName = "My City";
+                _settings.Port = 25565;
             }
             _network?.Restart(_settings);
         }
@@ -68,13 +72,199 @@ namespace MultiSkyLineII
         {
             var state = new MultiplayerResourceState
             {
-                Name = string.IsNullOrWhiteSpace(_settings?.CityName) ? "My City" : _settings.CityName.Trim(),
+                Name = ResolveCityName(),
                 PingMs = 0,
                 TimestampUtc = DateTime.UtcNow
             };
 
             MultiplayerResourceReader.TryRead(ref state);
             return state;
+        }
+
+        private string ResolveCityName()
+        {
+            if (DateTime.UtcNow < _nextCityNameRefreshUtc)
+                return _cachedCityName;
+
+            _nextCityNameRefreshUtc = DateTime.UtcNow.AddSeconds(2);
+            if (TryResolveCityName(out var cityName))
+            {
+                _cachedCityName = cityName;
+            }
+
+            return _cachedCityName;
+        }
+
+        private static bool TryResolveCityName(out string cityName)
+        {
+            cityName = null;
+            var manager = GameManager.instance;
+            if (manager == null)
+                return false;
+
+            if (TryReadCityNameFromObject(manager, out cityName))
+                return true;
+
+            var directNodes = new[]
+            {
+                "configuration", "gameSession", "session", "activeGame", "gameMode", "city", "cityData", "save", "saveGame"
+            };
+
+            for (var i = 0; i < directNodes.Length; i++)
+            {
+                var child = GetMemberValue(manager, directNodes[i]);
+                if (child != null && TryReadCityNameFromObject(child, out cityName))
+                    return true;
+            }
+
+            var visited = new HashSet<object>();
+            var objects = new System.Collections.ArrayList { manager };
+            var depths = new System.Collections.ArrayList { 0 };
+            visited.Add(manager);
+
+            for (var cursor = 0; cursor < objects.Count; cursor++)
+            {
+                var obj = objects[cursor];
+                var depth = (int)depths[cursor];
+                if (obj == null || depth > 2)
+                    continue;
+
+                if (TryReadCityNameFromObject(obj, out cityName))
+                    return true;
+
+                var type = obj.GetType();
+                var members = type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                for (var i = 0; i < members.Length; i++)
+                {
+                    object child = null;
+                    switch (members[i])
+                    {
+                        case PropertyInfo propertyInfo:
+                            if (!propertyInfo.CanRead || propertyInfo.GetIndexParameters().Length > 0)
+                                continue;
+                            if (propertyInfo.PropertyType.IsPrimitive || propertyInfo.PropertyType.IsEnum || propertyInfo.PropertyType == typeof(string))
+                                continue;
+                            try { child = propertyInfo.GetValue(obj); } catch { }
+                            break;
+                        case FieldInfo fieldInfo:
+                            if (fieldInfo.FieldType.IsPrimitive || fieldInfo.FieldType.IsEnum || fieldInfo.FieldType == typeof(string))
+                                continue;
+                            try { child = fieldInfo.GetValue(obj); } catch { }
+                            break;
+                    }
+
+                    if (child == null || visited.Contains(child))
+                        continue;
+
+                    visited.Add(child);
+                    objects.Add(child);
+                    depths.Add(depth + 1);
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryReadCityNameFromObject(object target, out string cityName)
+        {
+            cityName = null;
+            if (target == null)
+                return false;
+
+            var directNames = new[]
+            {
+                "cityName", "CityName", "city_name", "saveName", "SaveName", "displayName", "DisplayName", "name", "Name"
+            };
+
+            for (var i = 0; i < directNames.Length; i++)
+            {
+                var value = GetMemberValue(target, directNames[i]) as string;
+                if (IsValidCityName(value, directNames[i]))
+                {
+                    cityName = value.Trim();
+                    return true;
+                }
+            }
+
+            var type = target.GetType();
+            var members = type.GetMembers(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            for (var i = 0; i < members.Length; i++)
+            {
+                string name = null;
+                string value = null;
+
+                switch (members[i])
+                {
+                    case PropertyInfo propertyInfo:
+                        if (propertyInfo.PropertyType != typeof(string) || !propertyInfo.CanRead || propertyInfo.GetIndexParameters().Length > 0)
+                            continue;
+                        name = propertyInfo.Name;
+                        try { value = propertyInfo.GetValue(target) as string; } catch { }
+                        break;
+                    case FieldInfo fieldInfo:
+                        if (fieldInfo.FieldType != typeof(string))
+                            continue;
+                        name = fieldInfo.Name;
+                        try { value = fieldInfo.GetValue(target) as string; } catch { }
+                        break;
+                }
+
+                if (IsValidCityName(value, name))
+                {
+                    cityName = value.Trim();
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static object GetMemberValue(object target, string memberName)
+        {
+            if (target == null || string.IsNullOrWhiteSpace(memberName))
+                return null;
+
+            var type = target.GetType();
+            const BindingFlags Flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.IgnoreCase;
+
+            var propertyInfo = type.GetProperty(memberName, Flags);
+            if (propertyInfo != null && propertyInfo.CanRead && propertyInfo.GetIndexParameters().Length == 0)
+            {
+                try { return propertyInfo.GetValue(target); } catch { }
+            }
+
+            var fieldInfo = type.GetField(memberName, Flags);
+            if (fieldInfo != null)
+            {
+                try { return fieldInfo.GetValue(target); } catch { }
+            }
+
+            return null;
+        }
+
+        private static bool IsValidCityName(string value, string sourceMember)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return false;
+
+            var trimmed = value.Trim();
+            if (trimmed.Length < 2 || trimmed.Length > 80)
+                return false;
+
+            if (trimmed.Contains("\\") || trimmed.Contains("/") || trimmed.Contains(":"))
+                return false;
+
+            var member = sourceMember ?? string.Empty;
+            var lowerMember = member.ToLowerInvariant();
+            if (lowerMember.Contains("cityname") || lowerMember.Contains("city_name") || lowerMember.Contains("savename"))
+                return true;
+
+            if (lowerMember == "name" || lowerMember == "displayname")
+            {
+                return trimmed.IndexOf("city", StringComparison.OrdinalIgnoreCase) >= 0 || trimmed.Length >= 3;
+            }
+
+            return false;
         }
 
         private void RegisterLocalizationSource()

@@ -16,7 +16,6 @@ namespace MultiSkyLineII
             _entries[settings.GetOptionGroupLocaleID("Client")] = "Client";
 
             AddOption(settings, nameof(MultiplayerSettings.NetworkEnabled), "Enable Network", "Enable or disable multiplayer networking.");
-            AddOption(settings, nameof(MultiplayerSettings.CityName), "City Name", "Identifier shown to connected players.");
             AddOption(settings, nameof(MultiplayerSettings.HostMode), "Host Mode", "If enabled, this instance acts as server/host.");
             AddOption(settings, nameof(MultiplayerSettings.BindAddress), "Bind Address", "IP address used by the host listener.");
             AddOption(settings, nameof(MultiplayerSettings.ServerAddress), "Server Address", "Host IP address to connect to as client.");

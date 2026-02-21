@@ -11,10 +11,6 @@ namespace MultiSkyLineII
         public bool NetworkEnabled { get; set; }
 
         [SettingsUISection("General")]
-        [SettingsUITextInput]
-        public string CityName { get; set; }
-
-        [SettingsUISection("General")]
         public bool HostMode { get; set; }
 
         [SettingsUISection("Host")]
@@ -26,7 +22,7 @@ namespace MultiSkyLineII
         public string ServerAddress { get; set; }
 
         [SettingsUISection("General")]
-        [SettingsUISlider(min = 1024, max = 65535, step = 1, unit = "port")]
+        [SettingsUITextInput]
         public int Port { get; set; }
 
         public MultiplayerSettings(IMod mod) : base(mod)
@@ -37,11 +33,10 @@ namespace MultiSkyLineII
         public override void SetDefaults()
         {
             NetworkEnabled = false;
-            CityName = "My City";
             HostMode = true;
             BindAddress = "0.0.0.0";
             ServerAddress = "127.0.0.1";
-            Port = 32123;
+            Port = 25565;
         }
     }
 }

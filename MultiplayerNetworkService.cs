@@ -59,12 +59,12 @@ namespace MultiSkyLineII
             if (settings.HostMode)
             {
                 Task.Run(() => RunHostLoop(settings.BindAddress, settings.Port, token), token);
-                _log.Info($"Multiplayer host started on {settings.BindAddress}:{settings.Port} ({settings.CityName})");
+                _log.Info($"Multiplayer host started on {settings.BindAddress}:{settings.Port}");
             }
             else
             {
                 Task.Run(() => RunClientLoop(settings.ServerAddress, settings.Port, token), token);
-                _log.Info($"Multiplayer client started for {settings.ServerAddress}:{settings.Port} ({settings.CityName})");
+                _log.Info($"Multiplayer client started for {settings.ServerAddress}:{settings.Port}");
             }
         }
 
