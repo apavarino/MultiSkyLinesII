@@ -1,0 +1,25 @@
+{
+  "name": "multiskylineii-ui",
+  "private": true,
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "webpack --mode production && node scripts/copy-mod-json.js",
+    "dev": "webpack --mode development --watch && node scripts/copy-mod-json.js"
+  },
+  "exclude": [
+    "node_modules",
+    "build"
+  ],
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "webpack": "5.97.1",
+    "webpack-cli": "5.1.4"
+  }
+}

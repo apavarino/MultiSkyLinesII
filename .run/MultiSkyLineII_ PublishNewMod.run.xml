@@ -1,0 +1,6 @@
+﻿<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="MultiSkyLineII: PublishNewMod" type="DotNetMsBuildPublish" factoryName="Publish to IIS">
+    <riderPublish configuration="Release" platform="Any CPU" pubxml_path="$PROJECT_DIR$/Properties/PublishProfiles/PublishNewMod.pubxml" />
+    <method v="2" />
+  </configuration>
+</component>

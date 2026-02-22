@@ -107,14 +107,20 @@
     </ItemGroup>
 
     <PropertyGroup>
-        <DotNet6RuntimeMarker>C:\Program Files\dotnet\shared\Microsoft.NETCore.App\6.0.0</DotNet6RuntimeMarker>
+        <DotNet6RuntimeRoot>C:\Program Files\dotnet\shared\Microsoft.NETCore.App</DotNet6RuntimeRoot>
+        <DotNet6RuntimeCount>$([System.IO.Directory]::GetDirectories('$(DotNet6RuntimeRoot)', '6.0.*').Length)</DotNet6RuntimeCount>
     </PropertyGroup>
 
     <Target Name="RunModPostProcessor" AfterTargets="AfterBuild" Condition="'$(NeedBuild)'">
         <Error Condition="!Exists('$(ModPostProcessorFullPath)')" Text="Post processor not found, please check the path: $(ModPostProcessorFullPath)"/>
-        <Warning Condition="!Exists('$(DotNet6RuntimeMarker)')" Text="Skipping ModPostProcessor because .NET 6 runtime is not installed. Install Microsoft.NETCore.App 6.0.x to enable post-processing."/>
-        <Message Condition="Exists('$(DotNet6RuntimeMarker)')" Text="Run post processor: $(ModPostProcessorArgs)" Importance="high"/>
-        <Exec Condition="Exists('$(DotNet6RuntimeMarker)')" Command="$(ModPostProcessorArgs)" LogStandardErrorAsError="true"/>
+        <PropertyGroup>
+            <UnityModProjectCacheReady>false</UnityModProjectCacheReady>
+            <UnityModProjectCacheReady Condition="Exists('$(UnityModProjectFullPath)\Library\PackageCache')">true</UnityModProjectCacheReady>
+        </PropertyGroup>
+        <Warning Condition="'$(DotNet6RuntimeCount)'=='0'" Text="Skipping ModPostProcessor because .NET 6 runtime is not installed. Install Microsoft.NETCore.App 6.0.x to enable post-processing."/>
+        <Warning Condition="'$(DotNet6RuntimeCount)'!='0' and '$(UnityModProjectCacheReady)'!='true'" Text="Skipping ModPostProcessor because UnityModsProject cache is incomplete. Regenerate modding toolchain cache from the game."/>
+        <Message Condition="'$(DotNet6RuntimeCount)'!='0' and '$(UnityModProjectCacheReady)'=='true'" Text="Run post processor: $(ModPostProcessorArgs)" Importance="high"/>
+        <Exec Condition="'$(DotNet6RuntimeCount)'!='0' and '$(UnityModProjectCacheReady)'=='true'" Command="$(ModPostProcessorArgs)" LogStandardErrorAsError="true"/>
     </Target>
 
     <Target Name="BuildUiModule" AfterTargets="AfterBuild" Condition="'$(NeedBuild)' and Exists('UI\\package.json')">

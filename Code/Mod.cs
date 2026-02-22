@@ -71,15 +71,16 @@ namespace MultiSkyLineII
             {
                 var modsRoot = Path.Combine(Application.persistentDataPath, "Mods");
                 var deployedDir = Path.Combine(modsRoot, "MultiSkyLineII");
-                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "MultiSkyLineII.js")} exists={File.Exists(Path.Combine(deployedDir, "MultiSkyLineII.js"))}");
+                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "MultiSkyLineII.mjs")} exists={File.Exists(Path.Combine(deployedDir, "MultiSkyLineII.mjs"))}");
                 ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "mod.json")} exists={File.Exists(Path.Combine(deployedDir, "mod.json"))}");
+                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "package.json")} exists={File.Exists(Path.Combine(deployedDir, "package.json"))}");
             }
             catch (Exception e)
             {
                 ModDiagnostics.Write($"UI file check failed: {e}");
             }
 
-            CreateHudOverlay();
+            ModDiagnostics.Write("HUD overlay creation skipped (native CS2 UI mode).");
             CreateNativeUiBridge();
             ModDiagnostics.Write("OnLoad complete.");
         }

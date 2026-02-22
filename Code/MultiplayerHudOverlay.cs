@@ -53,7 +53,6 @@ namespace MultiSkyLineII
         private InputBarrier _hudInputBarrier;
         private static MethodInfo s_createAllBlockedBarrierMethod;
         private static bool s_createAllBlockedBarrierResolved;
-        private bool _autoOpenedInSession;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -82,29 +81,6 @@ namespace MultiSkyLineII
                 return;
             }
 
-            if (Input.GetKeyDown(KeyCode.F8))
-            {
-                _visible = !_visible;
-                ClampWindowToScreen();
-                ModDiagnostics.Write($"HudOverlay F8 pressed. Visible now={_visible}");
-            }
-
-            if (Input.GetKeyDown(KeyCode.F7))
-            {
-                _visible = !_visible;
-                ClampWindowToScreen();
-                ModDiagnostics.Write($"HudOverlay F7 pressed. Visible now={_visible}");
-            }
-
-            if (!_autoOpenedInSession)
-            {
-                _autoOpenedInSession = true;
-                _visible = true;
-                _activeTab = 1;
-                CenterWindowOnScreen();
-                ModDiagnostics.Write("HudOverlay auto-opened once in gameplay (Debug tab).");
-            }
-
             var hoveringHud = _visible && IsMouseOverHudWindow();
             if (hoveringHud)
             {
@@ -122,43 +98,124 @@ namespace MultiSkyLineII
 
             EnsureStyles();
             DrawLauncherButtons();
-
-            if (!_visible)
-                return;
-
-            var evt = Event.current;
-            if (evt != null && IsMouseOverHudWindow())
-            {
-                if (evt.type == EventType.ScrollWheel ||
-                    evt.type == EventType.MouseDown ||
-                    evt.type == EventType.MouseUp ||
-                    evt.type == EventType.MouseDrag ||
-                    evt.type == EventType.MouseMove ||
-                    evt.type == EventType.ContextClick)
-                {
-                    Input.ResetInputAxes();
-                    evt.Use();
-                }
-            }
-            _windowRect = GUI.Window(WindowId, _windowRect, DrawWindow, $"{_windowTitle} (F8)");
         }
 
         private void DrawLauncherButtons()
         {
-            var x = Screen.width - 190f;
+            var x = Screen.width - 110f;
             var y = 16f;
 
-            if (GUI.Button(new Rect(x, y, 80f, 24f), "MS2", _buttonStyle))
+            if (GUI.Button(new Rect(x, y, 96f, 24f), "MS2", _buttonStyle))
             {
-                _visible = !_visible;
-                ClampWindowToScreen();
-                ModDiagnostics.Write($"HudOverlay launcher clicked. Visible now={_visible}");
+                ShowNativeHubDialog();
+                ModDiagnostics.Write("HudOverlay MS2 launcher clicked. Opened native CS2 hub dialog.");
             }
+        }
 
-            if (GUI.Button(new Rect(x + 86f, y, 88f, 24f), "Logs", _buttonStyle))
+        private void ShowNativeHubDialog()
+        {
+            try
             {
-                ShowNativeLogsDialog();
-                ModDiagnostics.Write("HudOverlay logs launcher clicked. Opened native CS2 log dialog.");
+                var body = new StringBuilder(12288);
+                var states = _networkService.GetConnectedStates();
+                var contracts = _networkService.GetActiveContracts();
+                var proposals = _networkService.GetPendingProposals();
+                var logs = _networkService.GetDebugLogLines();
+                var local = _networkService.GetLocalState();
+
+                body.AppendLine("## Session");
+                body.Append("- Version: ").AppendLine(Mod.DisplayVersion);
+                body.Append("- Mode: ").Append(_networkService.IsHost ? "Host" : "Client").Append(" | Destination: ").AppendLine(_networkService.DestinationEndpoint);
+                body.Append("- Joueur local: ").Append(local.Name).Append(" | Population: ").Append(local.Population.ToString("N0")).Append(" | Budget: $").AppendLine(local.Money.ToString("N0"));
+                body.AppendLine();
+
+                body.Append("## Joueurs (").Append(states.Count).AppendLine(")");
+                if (states.Count == 0)
+                {
+                    body.AppendLine("- Aucun joueur.");
+                }
+                else
+                {
+                    for (var i = 0; i < states.Count; i++)
+                    {
+                        var s = states[i];
+                        body.Append("- ").Append(s.Name).Append(" | Ping ").Append(s.PingMs >= 0 ? s.PingMs.ToString() : "n/a").AppendLine(" ms");
+                        body.Append("  Elec ").Append(FormatResourceAmount(MultiplayerContractResource.Electricity, s.ElectricityFulfilledConsumption)).Append('/')
+                            .Append(FormatResourceAmount(MultiplayerContractResource.Electricity, s.ElectricityConsumption)).Append(" | ");
+                        body.Append("Eau ").Append(FormatResourceAmount(MultiplayerContractResource.FreshWater, s.FreshWaterFulfilledConsumption)).Append('/')
+                            .Append(FormatResourceAmount(MultiplayerContractResource.FreshWater, s.FreshWaterConsumption)).Append(" | ");
+                        body.Append("Eaux ").Append(FormatResourceAmount(MultiplayerContractResource.Sewage, s.SewageFulfilledConsumption)).Append('/')
+                            .AppendLine(FormatResourceAmount(MultiplayerContractResource.Sewage, s.SewageConsumption));
+                    }
+                }
+
+                body.AppendLine();
+                body.Append("## Contrats actifs (").Append(contracts.Count).AppendLine(")");
+                if (contracts.Count == 0)
+                {
+                    body.AppendLine("- Aucun contrat actif.");
+                }
+                else
+                {
+                    for (var i = 0; i < contracts.Count; i++)
+                    {
+                        var c = contracts[i];
+                        body.Append("- ").Append(c.SellerPlayer).Append(" -> ").Append(c.BuyerPlayer).Append(" | ")
+                            .Append(GetResourceLabel(c.Resource)).Append(' ')
+                            .Append(FormatResourceRate(c.Resource, c.UnitsPerTick))
+                            .Append(" | $").Append(c.PricePerTick).AppendLine("/tick");
+                    }
+                }
+
+                body.AppendLine();
+                body.Append("## Demandes en attente (").Append(proposals.Count).AppendLine(")");
+                if (proposals.Count == 0)
+                {
+                    body.AppendLine("- Aucune demande.");
+                }
+                else
+                {
+                    for (var i = 0; i < proposals.Count; i++)
+                    {
+                        var p = proposals[i];
+                        var expiresIn = Mathf.Max(0, 120 - (int)(DateTime.UtcNow - p.CreatedUtc).TotalSeconds);
+                        body.Append("- ").Append(p.BuyerPlayer).Append(" -> ").Append(p.SellerPlayer).Append(" | ")
+                            .Append(GetResourceLabel(p.Resource)).Append(' ')
+                            .Append(FormatResourceRate(p.Resource, p.UnitsPerTick))
+                            .Append(" | $").Append(p.PricePerTick).Append(" | ")
+                            .Append(expiresIn).AppendLine("s");
+                    }
+                }
+
+                body.AppendLine();
+                body.AppendLine("## Logs reseau (10 derniers)");
+                var start = Mathf.Max(0, logs.Count - 10);
+                if (logs.Count == 0)
+                {
+                    body.AppendLine("- Aucun log reseau.");
+                }
+                else
+                {
+                    for (var i = start; i < logs.Count; i++)
+                    {
+                        body.Append("- ").AppendLine(logs[i]);
+                    }
+                }
+
+                body.AppendLine();
+                body.Append("Diagnostics file: ").Append(ModDiagnostics.LogFilePath);
+
+                var dialog = new MessageDialog(
+                    "MultiSkyLineII",
+                    "Native CS2 panel",
+                    body.ToString(),
+                    copyButton: true,
+                    Game.UI.Localization.LocalizedString.Id("Common.OK"));
+                GameManager.instance?.userInterface?.appBindings?.ShowMessageDialog(dialog, _ => { });
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"HudOverlay failed to open native hub dialog: {e.Message}");
             }
         }
 
@@ -505,6 +562,106 @@ namespace MultiSkyLineII
             catch (Exception e)
             {
                 ModDiagnostics.Write($"HudOverlay failed to open native log dialog: {e.Message}");
+            }
+        }
+
+        private void ShowNativeOverviewDialog()
+        {
+            try
+            {
+                var body = new StringBuilder(4096);
+                var states = _networkService.GetConnectedStates();
+                var local = _networkService.GetLocalState();
+                body.Append("Version: ").AppendLine(Mod.DisplayVersion);
+                body.Append("Mode: ").Append(_networkService.IsHost ? "Host" : "Client").Append(" | Destination: ").AppendLine(_networkService.DestinationEndpoint);
+                body.Append("Joueur local: ").AppendLine(local.Name);
+                body.Append("Population: ").Append(local.Population.ToString("N0")).Append(" | Budget: $").AppendLine(local.Money.ToString("N0"));
+                body.AppendLine();
+                body.Append("Joueurs connectes: ").AppendLine(states.Count.ToString());
+                body.AppendLine();
+
+                for (var i = 0; i < states.Count; i++)
+                {
+                    var s = states[i];
+                    body.Append("- ").Append(s.Name).Append(" | Ping ").Append(s.PingMs >= 0 ? s.PingMs.ToString() : "n/a").AppendLine(" ms");
+                    body.Append("  Elec ").Append(FormatResourceAmount(MultiplayerContractResource.Electricity, s.ElectricityFulfilledConsumption)).Append('/')
+                        .AppendLine(FormatResourceAmount(MultiplayerContractResource.Electricity, s.ElectricityConsumption));
+                    body.Append("  Eau  ").Append(FormatResourceAmount(MultiplayerContractResource.FreshWater, s.FreshWaterFulfilledConsumption)).Append('/')
+                        .AppendLine(FormatResourceAmount(MultiplayerContractResource.FreshWater, s.FreshWaterConsumption));
+                    body.Append("  Eaux ").Append(FormatResourceAmount(MultiplayerContractResource.Sewage, s.SewageFulfilledConsumption)).Append('/')
+                        .AppendLine(FormatResourceAmount(MultiplayerContractResource.Sewage, s.SewageConsumption));
+                }
+
+                var dialog = new MessageDialog(
+                    "MultiSkyLineII Session",
+                    "Native CS2 overview",
+                    body.ToString(),
+                    copyButton: true,
+                    Game.UI.Localization.LocalizedString.Id("Common.OK"));
+                GameManager.instance?.userInterface?.appBindings?.ShowMessageDialog(dialog, _ => { });
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"HudOverlay failed to open native overview dialog: {e.Message}");
+            }
+        }
+
+        private void ShowNativeContractsDialog()
+        {
+            try
+            {
+                var body = new StringBuilder(4096);
+                var contracts = _networkService.GetActiveContracts();
+                var proposals = _networkService.GetPendingProposals();
+
+                body.Append("Contrats actifs: ").AppendLine(contracts.Count.ToString());
+                if (contracts.Count == 0)
+                {
+                    body.AppendLine("- Aucun");
+                }
+                else
+                {
+                    for (var i = 0; i < contracts.Count; i++)
+                    {
+                        var c = contracts[i];
+                        body.Append("- ").Append(c.SellerPlayer).Append(" -> ").Append(c.BuyerPlayer).Append(" | ")
+                            .Append(GetResourceLabel(c.Resource)).Append(' ')
+                            .Append(FormatResourceRate(c.Resource, c.UnitsPerTick))
+                            .Append(" | $").Append(c.PricePerTick).AppendLine("/tick");
+                    }
+                }
+
+                body.AppendLine();
+                body.Append("Demandes en attente: ").AppendLine(proposals.Count.ToString());
+                if (proposals.Count == 0)
+                {
+                    body.AppendLine("- Aucune");
+                }
+                else
+                {
+                    for (var i = 0; i < proposals.Count; i++)
+                    {
+                        var p = proposals[i];
+                        var expiresIn = Mathf.Max(0, 120 - (int)(DateTime.UtcNow - p.CreatedUtc).TotalSeconds);
+                        body.Append("- ").Append(p.BuyerPlayer).Append(" -> ").Append(p.SellerPlayer).Append(" | ")
+                            .Append(GetResourceLabel(p.Resource)).Append(' ')
+                            .Append(FormatResourceRate(p.Resource, p.UnitsPerTick))
+                            .Append(" | $").Append(p.PricePerTick).Append(" | ")
+                            .Append(expiresIn).AppendLine("s");
+                    }
+                }
+
+                var dialog = new MessageDialog(
+                    "MultiSkyLineII Contrats",
+                    "Native CS2 contracts",
+                    body.ToString(),
+                    copyButton: true,
+                    Game.UI.Localization.LocalizedString.Id("Common.OK"));
+                GameManager.instance?.userInterface?.appBindings?.ShowMessageDialog(dialog, _ => { });
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"HudOverlay failed to open native contracts dialog: {e.Message}");
             }
         }
 

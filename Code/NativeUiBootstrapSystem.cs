@@ -3,7 +3,7 @@ using Game.UI;
 
 namespace MultiSkyLineII
 {
-    public sealed class NativeUiBootstrapSystem : UISystemBase
+    public sealed partial class NativeUiBootstrapSystem : UISystemBase
     {
         public override GameMode gameMode => GameMode.GameOrEditor;
 
