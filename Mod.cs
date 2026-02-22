@@ -21,11 +21,17 @@ namespace MultiSkyLineII
         private MultiplayerLocaleSource _localeSource;
         private string[] _registeredLocales;
         private MultiplayerHudOverlay _hudOverlay;
+        private MultiplayerNativeUiBridge _nativeUiBridge;
         private string _cachedPlayerName = "Unknown Player";
         private bool _isApplyingSettings;
 
         public void OnLoad(UpdateSystem updateSystem)
         {
+            ModDiagnostics.ResetForNewSession();
+            ModDiagnostics.Write("OnLoad start.");
+            ModDiagnostics.Write($"Diagnostics file: {ModDiagnostics.LogFilePath}");
+            updateSystem.UpdateAt<NativeUiBootstrapSystem>(SystemUpdatePhase.UIUpdate);
+            ModDiagnostics.Write("Registered NativeUiBootstrapSystem at UIUpdate.");
             log.Info(nameof(OnLoad));
 
             _settings = new MultiplayerSettings(this);
@@ -46,22 +52,41 @@ namespace MultiSkyLineII
 
             _network = new MultiplayerNetworkService(log, GetLocalState);
             _network.Start(_settings);
+            ModDiagnostics.Write("Network service started.");
             if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
             {
                 DisplayVersion = ResolveDisplayVersion(asset.path);
                 log.Info($"Current mod asset at {asset.path}");
                 log.Info($"Resolved mod version for HUD: {DisplayVersion}");
+                ModDiagnostics.Write($"Asset path: {asset.path}");
+                ModDiagnostics.Write($"DisplayVersion: {DisplayVersion}");
             }
             else
             {
                 DisplayVersion = ResolveAssemblyDisplayVersion();
+                ModDiagnostics.Write($"DisplayVersion from assembly: {DisplayVersion}");
+            }
+
+            try
+            {
+                var modsRoot = Path.Combine(Application.persistentDataPath, "Mods");
+                var deployedDir = Path.Combine(modsRoot, "MultiSkyLineII");
+                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "MultiSkyLineII.js")} exists={File.Exists(Path.Combine(deployedDir, "MultiSkyLineII.js"))}");
+                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "mod.json")} exists={File.Exists(Path.Combine(deployedDir, "mod.json"))}");
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"UI file check failed: {e}");
             }
 
             CreateHudOverlay();
+            CreateNativeUiBridge();
+            ModDiagnostics.Write("OnLoad complete.");
         }
 
         public void OnDispose()
         {
+            ModDiagnostics.Write("OnDispose start.");
             if (_settings != null)
             {
                 _settings.onSettingsApplied -= OnSettingsApplied;
@@ -71,11 +96,13 @@ namespace MultiSkyLineII
             _network?.Dispose();
             _network = null;
             DestroyHudOverlay();
+            DestroyNativeUiBridge();
             UnregisterLocalizationSource();
             _localeSource = null;
             _settings = null;
 
             log.Info(nameof(OnDispose));
+            ModDiagnostics.Write("OnDispose complete.");
         }
 
         private void OnSettingsApplied(Setting _)
@@ -273,10 +300,12 @@ namespace MultiSkyLineII
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 _hudOverlay = go.AddComponent<MultiplayerHudOverlay>();
                 _hudOverlay.Initialize(_network);
+                ModDiagnostics.Write("HUD overlay created.");
             }
             catch (Exception e)
             {
                 log.Warn($"Failed to create HUD overlay: {e.Message}");
+                ModDiagnostics.Write($"HUD overlay creation failed: {e}");
             }
         }
 
@@ -290,11 +319,51 @@ namespace MultiSkyLineII
                 var go = _hudOverlay.gameObject;
                 _hudOverlay = null;
                 UnityEngine.Object.Destroy(go);
+                ModDiagnostics.Write("HUD overlay destroyed.");
             }
             catch (Exception e)
             {
                 log.Warn($"Failed to destroy HUD overlay: {e.Message}");
+                ModDiagnostics.Write($"HUD overlay destroy failed: {e}");
             }
         }
+
+        private void CreateNativeUiBridge()
+        {
+            try
+            {
+                var go = new GameObject("MultiSkyLineII_NativeUIBridge");
+                UnityEngine.Object.DontDestroyOnLoad(go);
+                _nativeUiBridge = go.AddComponent<MultiplayerNativeUiBridge>();
+                _nativeUiBridge.Initialize(_network);
+                log.Info("Native UI bridge initialized.");
+                ModDiagnostics.Write("Native UI bridge created and initialized.");
+            }
+            catch (Exception e)
+            {
+                log.Warn($"Failed to create native UI bridge: {e.Message}");
+                ModDiagnostics.Write($"Native UI bridge creation failed: {e}");
+            }
+        }
+
+        private void DestroyNativeUiBridge()
+        {
+            if (_nativeUiBridge == null)
+                return;
+
+            try
+            {
+                var go = _nativeUiBridge.gameObject;
+                _nativeUiBridge = null;
+                UnityEngine.Object.Destroy(go);
+                ModDiagnostics.Write("Native UI bridge destroyed.");
+            }
+            catch (Exception e)
+            {
+                log.Warn($"Failed to destroy native UI bridge: {e.Message}");
+                ModDiagnostics.Write($"Native UI bridge destroy failed: {e}");
+            }
+        }
+
     }
 }

@@ -1,6 +1,11 @@
 using System;
+using System.Diagnostics;
 using System.Reflection;
+using System.Text;
+using Game;
 using Game.Input;
+using Game.SceneFlow;
+using Game.UI;
 using UnityEngine;
 namespace MultiSkyLineII
 {
@@ -48,6 +53,7 @@ namespace MultiSkyLineII
         private InputBarrier _hudInputBarrier;
         private static MethodInfo s_createAllBlockedBarrierMethod;
         private static bool s_createAllBlockedBarrierResolved;
+        private bool _autoOpenedInSession;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -79,6 +85,24 @@ namespace MultiSkyLineII
             if (Input.GetKeyDown(KeyCode.F8))
             {
                 _visible = !_visible;
+                ClampWindowToScreen();
+                ModDiagnostics.Write($"HudOverlay F8 pressed. Visible now={_visible}");
+            }
+
+            if (Input.GetKeyDown(KeyCode.F7))
+            {
+                _visible = !_visible;
+                ClampWindowToScreen();
+                ModDiagnostics.Write($"HudOverlay F7 pressed. Visible now={_visible}");
+            }
+
+            if (!_autoOpenedInSession)
+            {
+                _autoOpenedInSession = true;
+                _visible = true;
+                _activeTab = 1;
+                CenterWindowOnScreen();
+                ModDiagnostics.Write("HudOverlay auto-opened once in gameplay (Debug tab).");
             }
 
             var hoveringHud = _visible && IsMouseOverHudWindow();
@@ -93,7 +117,13 @@ namespace MultiSkyLineII
 
         private void OnGUI()
         {
-            if (_networkService == null || !_networkService.IsRunning || !_visible || !IsInGameplay())
+            if (_networkService == null || !_networkService.IsRunning || !IsInGameplay())
+                return;
+
+            EnsureStyles();
+            DrawLauncherButtons();
+
+            if (!_visible)
                 return;
 
             var evt = Event.current;
@@ -110,9 +140,26 @@ namespace MultiSkyLineII
                     evt.Use();
                 }
             }
-
-            EnsureStyles();
             _windowRect = GUI.Window(WindowId, _windowRect, DrawWindow, $"{_windowTitle} (F8)");
+        }
+
+        private void DrawLauncherButtons()
+        {
+            var x = Screen.width - 190f;
+            var y = 16f;
+
+            if (GUI.Button(new Rect(x, y, 80f, 24f), "MS2", _buttonStyle))
+            {
+                _visible = !_visible;
+                ClampWindowToScreen();
+                ModDiagnostics.Write($"HudOverlay launcher clicked. Visible now={_visible}");
+            }
+
+            if (GUI.Button(new Rect(x + 86f, y, 88f, 24f), "Logs", _buttonStyle))
+            {
+                ShowNativeLogsDialog();
+                ModDiagnostics.Write("HudOverlay logs launcher clicked. Opened native CS2 log dialog.");
+            }
         }
 
         private bool IsMouseOverHudWindow()
@@ -364,6 +411,16 @@ namespace MultiSkyLineII
         private void DrawDebugTab(float contentTop, float viewWidth, float viewHeight)
         {
             var logs = _networkService.GetDebugLogLines();
+            if (GUI.Button(new Rect(_windowRect.width - 274f, 72f, 82f, 20f), "Log file", _buttonStyle))
+            {
+                OpenDiagnosticsLog();
+            }
+
+            if (GUI.Button(new Rect(_windowRect.width - 186f, 72f, 82f, 20f), "Center", _buttonStyle))
+            {
+                CenterWindowOnScreen();
+            }
+
             if (GUI.Button(new Rect(_windowRect.width - 96f, 72f, 80f, 20f), "Clear", _buttonStyle))
             {
                 _networkService.ClearDebugLog();
@@ -387,6 +444,88 @@ namespace MultiSkyLineII
                 }
             }
             GUI.EndScrollView();
+        }
+
+        private void OpenDiagnosticsLog()
+        {
+            try
+            {
+                var path = ModDiagnostics.LogFilePath;
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = path,
+                        UseShellExecute = true
+                    });
+                    ModDiagnostics.Write($"HudOverlay opened diagnostics log: {path}");
+                }
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"HudOverlay failed to open diagnostics log: {e.Message}");
+            }
+        }
+
+        private void ShowNativeLogsDialog()
+        {
+            try
+            {
+                var logs = _networkService?.GetDebugLogLines();
+                var logCount = logs?.Count ?? 0;
+                var start = Mathf.Max(0, logCount - 40);
+                var body = new StringBuilder(4096);
+                body.AppendLine("Recent network logs:");
+                body.AppendLine();
+
+                if (logCount == 0)
+                {
+                    body.AppendLine("(no network logs yet)");
+                }
+                else
+                {
+                    for (var i = start; i < logCount; i++)
+                    {
+                        body.AppendLine(logs[i]);
+                    }
+                }
+
+                body.AppendLine();
+                body.Append("Diagnostics file: ");
+                body.Append(ModDiagnostics.LogFilePath);
+
+                var dialog = new MessageDialog(
+                    "MultiSkyLineII Logs",
+                    "Native CS2 log panel",
+                    body.ToString(),
+                    copyButton: true,
+                    Game.UI.Localization.LocalizedString.Id("Common.OK"));
+                GameManager.instance?.userInterface?.appBindings?.ShowMessageDialog(dialog, _ => { });
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"HudOverlay failed to open native log dialog: {e.Message}");
+            }
+        }
+
+        private void CenterWindowOnScreen()
+        {
+            var width = Mathf.Min(_windowRect.width, Mathf.Max(560f, Screen.width - 24f));
+            var height = Mathf.Min(_windowRect.height, Mathf.Max(420f, Screen.height - 24f));
+            var x = Mathf.Max(12f, (Screen.width - width) * 0.5f);
+            var y = Mathf.Max(12f, (Screen.height - height) * 0.5f);
+            _windowRect = new Rect(x, y, width, height);
+        }
+
+        private void ClampWindowToScreen()
+        {
+            var width = Mathf.Min(_windowRect.width, Mathf.Max(320f, Screen.width - 12f));
+            var height = Mathf.Min(_windowRect.height, Mathf.Max(240f, Screen.height - 12f));
+            var maxX = Mathf.Max(6f, Screen.width - width - 6f);
+            var maxY = Mathf.Max(6f, Screen.height - height - 6f);
+            var x = Mathf.Clamp(_windowRect.x, 6f, maxX);
+            var y = Mathf.Clamp(_windowRect.y, 6f, maxY);
+            _windowRect = new Rect(x, y, width, height);
         }
 
         private void DrawContractsSection(System.Collections.Generic.IReadOnlyList<MultiplayerContract> contracts, float y, float width)

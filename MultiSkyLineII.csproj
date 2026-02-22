@@ -117,6 +117,11 @@
         <Exec Condition="Exists('$(DotNet6RuntimeMarker)')" Command="$(ModPostProcessorArgs)" LogStandardErrorAsError="true"/>
     </Target>
 
+    <Target Name="BuildUiModule" AfterTargets="AfterBuild" Condition="'$(NeedBuild)' and Exists('UI\\package.json')">
+        <Message Text="Build UI module (UI\\package.json)." Importance="high"/>
+        <Exec Command="npm run build --prefix UI" LogStandardErrorAsError="true"/>
+    </Target>
+
     <Target Name="ReadPublishModId" BeforeTargets="RunModPublisher">
         <XmlPeek XmlInputPath="$(PublishConfigurationFullPath)" Query="/Publish/ModId/@Value">
             <Output TaskParameter="Result" PropertyName="PublishModId"/>

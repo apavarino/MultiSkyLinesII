@@ -1,0 +1,294 @@
+﻿{| style="width: 100%;"
+|{{Ambox 
+| style = max-width: 900px; background-color: #5f3333; border: 1px solid #fea67c; border-radius: 4px; padding: 5px; color: #fea67c
+| textstyle = padding: 10px
+| type = other
+| image = [[Image:AdvisorNotifications.png|60 px|link= ]]
+| text = '''Warning: Beta Documentation'''<br>
+<small>''The UI Modding is currently in beta. This means features may not be finished and are subject to changes. This page will be updated.
+''</small>
+}}
+{{clear}}
+| {{Ambox 
+| style = float: right; max-width: 400px; border: 1px solid #000; border-radius: 4px; padding: 5px
+| type = other
+| image = [[Image:Paradox logo black square.png|40 px|link= ]]
+| text = '''Verified by Paradox Interactive'''<br>
+<small>This article has been verified by [[Paradox Interactive]] for [[Cities_Skylines_2_Wiki:Versioning|version]] 1.1.0f1 of the game.</small>
+[[Category:1.1.0f1]]
+}}
+{{clear}}
+|}
+
+{{see also|Modding Toolchain|Modding}}
+
+<div style="max-width: 900px;">
+{{ToC|right}}
+[[Cities Skylines II]] UI is built on top of a [https://docs.coherent-labs.com/unity-gameface/ Coherent Gameface™] UI middleware providing a HTML/CSS layouting and JS engines. 
+
+Coherent enables you to use a lot of standard web technologies but to ensure high performance and low overhead the HTML/CSS layouting supports only the flex model and currently grid based layouts are not supported. This means some of the common JS packages and frameworks might have compatibility issues.
+
+All available [https://docs.coherent-labs.com/unity-gameface/content_development/supported_features_tables/cssproperties/ CSS], [https://docs.coherent-labs.com/unity-gameface/content_development/supported_features_tables/jsevents/ JS] and [https://docs.coherent-labs.com/unity-gameface/content_development/supported_features_tables/htmlelements/ HTML] features are listed in their documentation.
+
+The CSII UI is built with React, with SCSS for our styles and coded with TypeScript to provide type safety. The game UI is built in node.js environment using webpack which transpiles and bundles the source code to an executable package. With the [[Modding Toolchain]] we provide you with exactly the same setup and utilities to make it easy to get started while ensuring we can share the core libraries between the game and the mods. This helps us to guarantee compatibility and avoid duplication, version mismatches and memory overhead.
+
+Coherent is mostly a standard HTML/JS/CSS runtime which enables you to use any web technology you are familiar with but we strongly encourage you to use the same technologies to make it easier for mods to play together nicely!
+
+* '''Typescript''' - it’s a strongly typed language which compiles into a performant JavaScript. All the CSII UI libraries we expose have typings for TypeScript which provide code autocompletion and type safety. TypeScript is very similar to JavaScript so if you’ve never used it before worry not. It’s easy to pick up even with basic JS or C# knowledge.
+* '''React''' - a JavaScript UI framework which we use to optimize rendering and provide structure to our codebase. We are injecting a single instance of React to all mods to ensure there are no React version mismatches and performance issues.
+* '''SCSS''' - a superset of CSS with extra utilities and helpers which helps to create maintainable styles.
+* '''cohtml''' - provides low level access to the Coherent HTML engine to hook into value bindings, trigger methods or access translation or other APIs. We provide our wrappers in <code>cs2/api</code> package that better hooks into the game’s UI lifecycle but it is available via import engine from <code>"cohtml/cohtml";</code> if needed.
+* '''Webpack''' - used to optimize and build the source code. It also allows us to do code injection and share code and libraries between the core game UI framework and the mods.
+
+=== CSS, SCSS and CSSmodules ===
+
+To avoid naming collisions we are using CSS modules which thanks to the code transpilation with Webpack transforms CSS class names by adding suffixes. This means that targeting selectors outside of your css module might not be stable - the class name might change. Convention for css modules requires them to be named as '''file_name.module.scss''' Only files named with this pattern will be parsed as modules and will have the class names exposed and available for importing in your TSX/JSX files.
+
+And the css classes should not be hardcoded in your HTML/JSX but rather imported and accessed from the imported module definition object ie. assuming we had a CSS module like so:
+
+'''src/my-mod.module.scss 📁'''
+<syntaxhighlight lang="css">
+.myClass {
+	font-weight: bold;
+}
+
+.aClass {
+	font-size: 20rem;
+}
+</syntaxhighlight>
+
+We can then import it in a TSX/JSX file and the styles object will be an object like so:
+
+'''src/component.tsx 📁'''
+<syntaxhighlight lang="css">
+import styles from "./my-mod.module.scss";
+
+// styles = { myClass: "myClass_2dk021", "aClass": "aClass_kdas0k" }
+
+export const Component = () => (
+	<div className={styles.myClass}>
+		My Mod
+	</div>
+);
+</syntaxhighlight>
+
+cs2 API is exposed via modules you can import.
+
+=== Using image assets ===
+
+We support svg, png, jpg and gif assets. Be mindful that gif assets add a lot of memory overhead so we don't recommend using them. To ensure images scale well for different resolutions and do not take a lot of memory we recommend using SVG images - they are used for most of the graphics in the game's UI.
+
+Images to be included in a mod need to be properly registered, path to the asset in a coherent host needs to be updated and image itself needs to be moved to the right build target location.
+
+To allow that, images can’t be simply placed in a folder and referenced with a fixed path. We need to import images similarly as the CSS modules. Image imported this way will provide the path to the asset which will then be handled by webpack to ensure React gets the right path.
+
+One thing to note is the SVG images in coherent require width and height provided/ This is why we are importing here the iconStyles css module which provides the icon class that sets the desired icon width and height.
+
+We can also include images inside of a CSS module. To do that we don’t have to import the images like in the TS/JS files. We can simply set a relative path from the location of the CSS file and Webpack will handle updating the target asset path automatically.
+
+'''src/Icon.module.scss 📁'''
+<syntaxhighlight lang="css">
+.icon {
+	width: 40rem;
+	height: 40rem;
+}
+
+.cssIcon {
+	width: 40rem;
+	height: 40rem;
+	background-image: url('./bagel.svg');
+}
+</syntaxhighlight>
+
+'''src/component.tsx 📁'''
+<syntaxhighlight lang="css">
+import { FloatingButton } from "cs2/ui"; 
+import workerSrc from "./construction-worker.svg";
+import tadaSrc from "./tada.svg";
+import iconStyles from "./icon.module.scss";
+
+const Component = () => (
+	<div>
+		<FloatingButton src={workerSrc} />
+		<img src={tadaSrc} className={iconStyles.icon} />
+		<div className={iconStyles.cssIcon} />
+	</div>
+)
+</syntaxhighlight>
+
+=== Ensuring the UI is scalable for all resolutions. ===
+
+To ensure the UI scales to the screen resolution we are not using absolute values apart from a few exceptions where we always want to render fine/thin lines or spacings to fix quality of rendering. Ie. 1px borders, gaps etc. To enable scalable UI we are using '''relative em''' units.
+
+1rem is equal to about 1px at a FullHD resolution - we use it as a design reference resolution so at 4k 1rem will be 2px, at 1440p about 1.3px etc. UI can render at subpixels so don’t mind the values not being integers - Coherent takes care of that to look right most of the time.
+
+''Example:'' If we wanted an icon to be 40px at 1080p and maintain proportions when resolution goes bigger or smaller we’d set its width and height to 40rem. 
+
+All parts of the UI of the game is done like this and to ensure the mods look the same for all the players you should follow this pattern as well. 
+
+=== cs2/* packages ===
+
+To make the UI Modding easier, to hide some of the complexities of Coherent and to avoid performance traps - we provide access to some of the component libraries, hooks and utilities that we use internally to build the game UI itself. This means they are mostly based on React so if you choose to use another technology they might not be compatible with your mod.
+
+Packages are not available in the mod’s source but they are rather injected at the Game’s runtime to ensure they always use the same version of code that is available in the installed version of the game. To provide code autocomplete we provide TypeScript typings which VSCode, Rider or other IDEs/editors can read and expose to you package APIs.
+
+''Example import:''
+<syntaxhighlight lang="css">
+import { LocalizedString, useLocalization } from "cs2/l10n";
+import { Button, ConfirmationDialog, Panel, Portal, FloatingButton, PanelSection, PanelSectionRow, FormattedParagraphs } from "cs2/ui";
+</syntaxhighlight>
+
+==== cs2/api ====
+
+Utilities for interfacing with C# APIs. Detailed use of cs2/api and cs2/bindings packages in a further section.
+
+* <code>bindValue</code> - creates a subscribe listener for a given value binding on the C# side by providing its bindings group (or mod name) and value binding name. The subscriber allows to create a single C# bridge for a given value for all UI consumers so it is important to reuse the bound values. Used in tandem with <code>useValue</code> hook.
+* <code>call</code> - calls a call binding on the C# side and returns a promise with its value - can be used with async/await.
+* <code>trigger</code> - calls a trigger binding on the C# side. Does not return a value.
+* <code>useValue</code> - a hook that provides current binding’s value. The hook value updates only if the value of the bound value changed.
+
+==== cs2/bindings ====
+
+All existing bindings, triggers and calls that are used by the game UI itself under different namespaces. Please explore what’s available! Bound values follow a pattern of having a name with a $ suffix. These should be used with the <code>useValue</code> hook. 
+
+==== cs2/l10n ====
+
+Components, utilities and tools for localization of your mod. Contains components for locale sensitive formatting of numbers ie.  and translating text strings with translation keys. Also exposes a <code>useLocalization</code> hook which provides access to a loc object with a translate method for translating strings in your code/hooks and unitSettings object which provides details on text/number formatting for active locale.
+
+==== cs2/modding ====
+
+Exposes typings and utilities for overriding, extending and/or augmenting game UI modules. We’ll dive deeper with this package further on.
+
+==== cs2/ui ====
+
+A library of UI components that were also used to build the game UI. UI library will try to expose building blocks for creating different mods. They will fit the style of the game’s UI and will provide gamepad support.
+
+* <code>Button, MenuButton, FloatingButton</code> - Menu button as in main menu, Floating buttons are the buttons in top left/right of the game screen. Button is a more generic component with the option to select a variant/style or provide custom styles. 
+* <code>ConfirmationDialog</code> - used for yes/no confirmation questions. Useful for preventing players from potentially destructive actions.
+* <code>Dropdown, DropdownToggle, DropdownItem</code> - used to create Select Fields and Dropdown options.
+* <code>FormattedParagraphs</code> - for rendering new line separated blocks of text, <code>FormattedText</code> for single paragraph and two renderers that we use internally - <code>MarkdownRenderer</code> and <code>MarkupRenderer</code>
+* <code>Icon</code> - for creating icons or tinted icons like you can see in the game.
+* <code>Panel, PanelSection, PanelSectionRow</code> - For creating panel windows like info panels and most of in game popups. 
+* <code>Portal</code> (see [https://react.dev/reference/react-dom/createPortal React Portal]) which allows to render content outside of current component’s DOM position while keeping the contents of a Portal part of current components react lifecycle. Useful for things like pop ups, floating windows etc.
+* <code>Scrollable</code> - for creating scrollable lists, panels or popup contents etc.
+* <code>Tooltip</code> for adding on hover hint tooltips.
+
+<small> ''More UI components will be exposed in the future.''</small>
+
+==== cs2/utils ====
+
+Assorted general purpose utilities.
+
+* Utilities useful for rendering optimizations with React.memo or useMemo hook: <code>shallowEqual, entityEquals, entityKey, parseEntityKey, isNullOrEmpty, useMemoizedValue</code>.
+* Number formatting utilities: <code>formatLargeNumber, useFormattedLargeNumber</code>
+* Responsive units utils: <code>useRem, useCssLength</code>
+
+==== cs2/input ====
+
+<small>''Components and utilities for adding keyboard bindings and gamepad support will be exposed in the future''</small>
+
+=== Mounting the UI mods and the Module Registry ===
+
+Mods are mounted in the game UI via a module registry which provides access to all the modules from which the game UI is built - with a very short exceptions list. This enables one to modify every single component of the user’s interface. Be it by augmenting/extending, appending something or completely overriding it. This applies to both the JavaScript/TypeScript modules with React components, utilities and configurations and to CSS modules that define how the UI is rendered.
+
+To make adding new elements to the UI simpler than going low level and manipulating selected modules and their exported content we’ve provided short list of standard hook points allowing one to quickly 
+
+Module Registry instance is injected into your mods entry point (<code>index.tsx</code> file) 	via the required default export function implementing the <code>ModRegistrar</code> interface.
+
+''Example UI mod entry point file:''
+
+'''src/index.tsx 📁'''
+<syntaxhighlight lang="css">
+import { ModRegistrar } from "cs2/modding";
+
+import { GameMod } from "./components/game-mod.tsx";
+
+const register: ModRegistrar = (moduleRegistry) => {
+// Search the module registry for buttons and log to console
+   	 console.log(
+'List of everything Button',
+moduleRegistry.find(/Button/)
+);
+
+// code here is executed when the mod and its dependencies 
+// are fully loaded by the host UI React app 
+console.log("UI Modding example");
+
+// mods registered via the moduleRegistry append, override,
+// extend methods are executed only after their mounting 
+// component/view renders in the Game
+moduleRegistry.append('Game', GameMod);
+moduleRegistry.append('Menu', MenuMod);
+}
+
+export default register;
+</syntaxhighlight>
+
+==== Find ====
+
+Find allows one to search through the module registry using either a string or a regexp. Find will return an address to a module by matching against the module's path including original module file name and by trying to match names of exported module components.
+
+It is also possible to explore the contents of the module registry by console logging <code>moduleRegistry.registry</code>  or dropping a debugger/debugging breakpoint and inspecting it in either the devtools console or the sources tab.
+
+==== Override ====
+
+Is used to completely replace existing module with a new one ie. Replacing a standard UI component for one of Main Menu or Game elements or CSS stylesheet to completely overhaul the behavior of the UI.
+
+==== Extend ====
+
+Allows to augment existing modules and provides you with the original one to either wrap it, modify its props, modify its children or add/remove/completely change how given component works. Extending CSS provides a CSS module and enables one to modify class names by either changing them, adding new ones or replacing all or some of the class names a CSS module exports.
+
+<syntaxhighlight lang="css">
+// extending a React Component 
+const MainMenuNavigationExtend: ModuleRegistryExtend = (Component) => {
+    return (props) => {
+        const { children, ...otherProps } = props || {};
+
+        return (
+            <Component {...otherProps}>
+                <div className={itemCss.item}>Injected item</div>
+                {children}
+            </Component>
+        );
+    };
+}
+
+// extend(modulePath, exportName, Component)
+moduleRegistry.extend('game-ui/menu/components/main-menu-screen/main-menu-screen.tsx', 'MainMenuNavigation', MainMenuNavigationExtend);
+
+// css extend example
+// css mod should have an overlap in class names to work
+import modCss from './mods/menu-mod.module.scss';
+
+// extend(modulePath, cssModule)    
+moduleRegistry.extend('game-ui/menu/components/main-menu-screen/main-menu-screen.module.scss', modCss);
+</syntaxhighlight>
+
+==== Append ====
+
+Is a wrapper around the extend method, it allows you to target an exported '''React Component''' or a '''CSS''' module and respectively append a new component to host component’s children list or extend existing class names mapped to a given class name with new ones provided from a new stylesheet. 
+
+<syntaxhighlight lang="css">
+import { MenuButton } from "cs2/ui";
+
+const CustomMenuButton = () => <MenuButton>A button</MenuButton>
+
+// append(modulePath, exportName, Component)
+moduleRegistry.append('game-ui/menu/components/main-menu-screen/main-menu-screen.tsx', 'MainMenuNavigation', CustomMenuButton);
+</syntaxhighlight>
+
+==== Append at Hook ====
+
+Append allows to also append React components to a couple of standard locations enabling to quickly mount your mod in a desired location without the need to target specific components.
+
+Available hook points are: <code>Menu, Game, Editor</code> for general hooking into the main game views and <code>GameTopLeft, GameTopRight</code> and <code>GameBottomRight</code> to append a mod’s trigger button to one of the 3 main game view floating navigation bar areas. Game navigation area hooks always append new buttons after the native controls.
+
+<syntaxhighlight lang="css">
+// append(hookName, Component)
+moduleRegistry.append('Menu', MenuMod);
+moduleRegistry.append('Game', GameMod);
+moduleRegistry.append('GameTopRight', ModTriggerButton);
+</syntaxhighlight>
+
+</div>
+[[Category:Modding]]

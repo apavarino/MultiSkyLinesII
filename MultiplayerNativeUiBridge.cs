@@ -17,15 +17,21 @@ namespace MultiSkyLineII
         private ValueBinding<bool> _visibleBinding;
         private ValueBinding<string> _payloadBinding;
         private bool _visible;
+        private bool _bindingsRegistered;
         private string _lastPayload = "{}";
         private string _uiMessage;
         private DateTime _uiMessageUntilUtc;
         private DateTime _nextLocalStateCaptureUtc;
         private DateTime _nextPayloadRefreshUtc;
+        private DateTime _uiHandshakeDeadlineUtc;
+        private bool _uiHandshakeReceived;
+        private bool _uiHandshakeTimeoutLogged;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
             _networkService = networkService;
+            ModDiagnostics.Write("NativeUiBridge.Initialize called.");
+            _uiHandshakeDeadlineUtc = DateTime.UtcNow.AddSeconds(25);
             RegisterBindings();
             PublishSnapshot(force: true);
         }
@@ -34,6 +40,11 @@ namespace MultiSkyLineII
         {
             if (_networkService == null)
                 return;
+
+            if (!_bindingsRegistered)
+            {
+                RegisterBindings();
+            }
 
             if (DateTime.UtcNow >= _nextLocalStateCaptureUtc)
             {
@@ -48,7 +59,7 @@ namespace MultiSkyLineII
             }
             else if (inGameplay && Input.GetKeyDown(KeyCode.F8))
             {
-                Mod.log.Info($"[NativeHUD] F8 pressed (current visible={_visible})");
+                ModDiagnostics.Write($"NativeUiBridge F8 pressed. Visible before toggle={_visible}");
                 SetVisible(!_visible);
             }
 
@@ -57,10 +68,19 @@ namespace MultiSkyLineII
                 PublishSnapshot(force: false);
                 _nextPayloadRefreshUtc = DateTime.UtcNow.AddMilliseconds(300);
             }
+
+            if (!_uiHandshakeReceived && !_uiHandshakeTimeoutLogged && DateTime.UtcNow >= _uiHandshakeDeadlineUtc)
+            {
+                _uiHandshakeTimeoutLogged = true;
+                ModDiagnostics.Write("NativeUiBridge warning: UI handshake was not received within timeout. JS UI module likely not mounted by game.");
+            }
         }
 
         private void RegisterBindings()
         {
+            if (_bindingsRegistered)
+                return;
+
             try
             {
                 var bindingStore = GameManager.instance?.userInterface?.bindings;
@@ -78,10 +98,17 @@ namespace MultiSkyLineII
                 AddBinding(new TriggerBinding<string, bool>(Group, "respond", RespondProposal));
                 AddBinding(new TriggerBinding<string>(Group, "cancel", CancelContract));
                 AddBinding(new TriggerBinding(Group, "clearLogs", ClearLogs));
+                AddBinding(new TriggerBinding(Group, "uiReady", UiReady));
+                AddBinding(new TriggerBinding<string>(Group, "uiPing", UiPing));
+                _bindingsRegistered = true;
+                ModDiagnostics.Write("NativeUiBridge bindings registered.");
+                _visibleBinding?.Update(_visible);
+                PublishSnapshot(force: true);
             }
             catch (Exception e)
             {
                 Mod.log.Warn($"Failed to register native UI bindings: {e.Message}");
+                ModDiagnostics.Write($"NativeUiBridge bindings registration failed: {e}");
             }
         }
 
@@ -108,6 +135,7 @@ namespace MultiSkyLineII
 
             _visible = next;
             Mod.log.Info($"[NativeHUD] SetVisible -> {_visible} (inGameplay={inGameplay})");
+            ModDiagnostics.Write($"NativeUiBridge.SetVisible({_visible}) inGameplay={inGameplay}");
             _visibleBinding?.Update(_visible);
             PublishSnapshot(force: true);
         }
@@ -172,6 +200,19 @@ namespace MultiSkyLineII
         {
             _networkService?.ClearDebugLog();
             PublishSnapshot(force: true);
+        }
+
+        private void UiReady()
+        {
+            _uiHandshakeReceived = true;
+            Mod.log.Info("[NativeHUD] UI module mounted and handshake received.");
+            ModDiagnostics.Write("NativeUiBridge handshake from UI received (uiReady).");
+        }
+
+        private void UiPing(string message)
+        {
+            var text = string.IsNullOrWhiteSpace(message) ? "<empty>" : message;
+            ModDiagnostics.Write($"NativeUiBridge uiPing: {text}");
         }
 
         private void SetUiMessage(string message)
@@ -354,7 +395,9 @@ namespace MultiSkyLineII
             }
             finally
             {
+                _bindingsRegistered = false;
                 _bindings.Clear();
+                ModDiagnostics.Write("NativeUiBridge destroyed and bindings cleared.");
             }
         }
     }

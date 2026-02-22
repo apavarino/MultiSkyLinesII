@@ -3,3 +3,8 @@ obj/
 /packages/
 riderModule.iml
 /_ReSharper.Caches/
+.idea/
+UI/node_modules/
+Tools/StockModTemplatesDiffer/
+Tools/**/bin/
+Tools/**/obj/
