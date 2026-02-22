@@ -27,6 +27,7 @@ namespace MultiSkyLineII
         private readonly List<MultiplayerContract> _contracts = new List<MultiplayerContract>();
         private readonly List<MultiplayerContractProposal> _pendingProposals = new List<MultiplayerContractProposal>();
         private readonly Dictionary<string, int> _contractEffectiveUnits = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> _contractFailureCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly ConcurrentQueue<string> _outboundMessages = new ConcurrentQueue<string>();
         private readonly List<string> _debugLog = new List<string>();
         private readonly List<SettlementEvent> _settlementHistory = new List<SettlementEvent>();
@@ -46,6 +47,8 @@ namespace MultiSkyLineII
         private int _configuredPort = 25565;
         private const int MaxDebugLogEntries = 300;
         private const int MaxSettlementHistoryEntries = 300;
+        private const int MaxSettlementSyncEntries = 40;
+        private const int ContractCancelFailureThreshold = 3;
 
         private struct SettlementEvent
         {
@@ -210,6 +213,7 @@ namespace MultiSkyLineII
                 _contracts.Clear();
                 _pendingProposals.Clear();
                 _contractEffectiveUnits.Clear();
+                _contractFailureCounts.Clear();
                 _settlementHistory.Clear();
                 _authoritativeLocalState = null;
                 _hasMainThreadLocalState = false;
@@ -1229,6 +1233,7 @@ namespace MultiSkyLineII
                 return "SETTLES";
 
             var entries = _settlementHistory
+                .Skip(Math.Max(0, _settlementHistory.Count - MaxSettlementSyncEntries))
                 .Select(s => $"{s.Id},{Uri.EscapeDataString(s.SellerPlayer ?? string.Empty)},{Uri.EscapeDataString(s.BuyerPlayer ?? string.Empty)},{s.Payment}")
                 .ToArray();
             return "SETTLES|" + string.Join("|", entries);
@@ -1449,6 +1454,7 @@ namespace MultiSkyLineII
             }
 
             _contracts.RemoveAt(index);
+            _contractFailureCounts.Remove(contract.Id);
             AddDebugLog($"Contract {contractId} cancelled by {actorPlayer}.");
             return true;
         }
@@ -1491,6 +1497,7 @@ namespace MultiSkyLineII
             if (_contracts.Count == 0)
             {
                 _contractEffectiveUnits.Clear();
+                _contractFailureCounts.Clear();
                 return;
             }
 
@@ -1516,20 +1523,26 @@ namespace MultiSkyLineII
 
                 if (!CanUseOutsideConnection(seller, contract.Resource) || !CanUseOutsideConnection(buyer, contract.Resource))
                 {
-                    AddDebugLog($"Contract {contract.Id} cancelled (outside connection unavailable).");
-                    _contracts.RemoveAt(i);
-                    i--;
+                    if (!TryHandleContractFailure(contract.Id, "outside connection unavailable", i, out var removedIndex))
+                        continue;
+                    if (removedIndex)
+                        i--;
                     continue;
                 }
 
                 var available = GetSellerAvailable(contract.Resource, seller);
-                if (available < contract.UnitsPerTick)
+                var committedOutgoing = GetCommittedOutgoingUnits(contract.SellerPlayer, contract.Resource);
+                var baselineAvailable = available + committedOutgoing;
+                if (baselineAvailable < contract.UnitsPerTick)
                 {
-                    AddDebugLog($"Contract {contract.Id} cancelled (seller cannot deliver full contracted amount).");
-                    _contracts.RemoveAt(i);
-                    i--;
+                    if (!TryHandleContractFailure(contract.Id, "seller cannot deliver full contracted amount", i, out var removedIndex))
+                        continue;
+                    if (removedIndex)
+                        i--;
                     continue;
                 }
+
+                _contractFailureCounts[contract.Id] = 0;
 
                 if (contract.PricePerTick <= 0 || buyer.Money < contract.PricePerTick)
                 {
@@ -1595,6 +1608,48 @@ namespace MultiSkyLineII
                 default:
                     return false;
             }
+        }
+
+        private int GetCommittedOutgoingUnits(string sellerPlayer, MultiplayerContractResource resource)
+        {
+            if (string.IsNullOrWhiteSpace(sellerPlayer))
+                return 0;
+
+            var normalizedSeller = NormalizePlayerName(sellerPlayer);
+            var total = 0;
+            for (var i = 0; i < _contracts.Count; i++)
+            {
+                var c = _contracts[i];
+                if (c.Resource != resource)
+                    continue;
+
+                if (!string.Equals(c.SellerPlayer, normalizedSeller, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                total += Math.Max(0, c.UnitsPerTick);
+            }
+
+            return total;
+        }
+
+        private bool TryHandleContractFailure(string contractId, string reason, int index, out bool removedIndex)
+        {
+            removedIndex = false;
+            var failures = 0;
+            _contractFailureCounts.TryGetValue(contractId, out failures);
+            failures++;
+            _contractFailureCounts[contractId] = failures;
+            if (failures < ContractCancelFailureThreshold)
+            {
+                AddDebugLog($"Contract {contractId} transient failure {failures}/{ContractCancelFailureThreshold}: {reason}.");
+                return false;
+            }
+
+            AddDebugLog($"Contract {contractId} cancelled ({reason}) after {failures} failed checks.");
+            _contracts.RemoveAt(index);
+            _contractFailureCounts.Remove(contractId);
+            removedIndex = true;
+            return true;
         }
 
         private static void ApplyResourceTransfer(MultiplayerContractResource resource, ref MultiplayerResourceState seller, ref MultiplayerResourceState buyer, int units)

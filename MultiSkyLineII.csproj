@@ -24,6 +24,9 @@
         <Reference Include="Colossal.IO.AssetDatabase">
             <Private>false</Private>
         </Reference>
+        <Reference Include="Colossal.UI.Binding">
+            <Private>false</Private>
+        </Reference>
         <Reference Include="UnityEngine.CoreModule">
             <Private>false</Private>
         </Reference>

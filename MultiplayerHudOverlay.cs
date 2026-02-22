@@ -1,11 +1,13 @@
-﻿using System;
+using System;
+using System.Reflection;
+using Game.Input;
 using UnityEngine;
 namespace MultiSkyLineII
 {
     public sealed class MultiplayerHudOverlay : MonoBehaviour
     {
         private MultiplayerNetworkService _networkService;
-        private Rect _windowRect = new Rect(18f, 72f, 540f, 520f);
+        private Rect _windowRect = new Rect(16f, 56f, 780f, 680f);
         private bool _visible;
         private const int WindowId = 932104;
         private Vector2 _scrollPosition;
@@ -18,12 +20,19 @@ namespace MultiSkyLineII
         private GUIStyle _nameStyle;
         private GUIStyle _textStyle;
         private GUIStyle _smallStyle;
+        private GUIStyle _buttonStyle;
+        private GUIStyle _tabStyle;
+        private GUIStyle _tabActiveStyle;
         private Texture2D _windowBg;
         private Texture2D _cardBg;
         private Texture2D _meterBg;
         private Texture2D _meterFillGood;
         private Texture2D _meterFillWarn;
         private Texture2D _meterFillBad;
+        private Texture2D _buttonBg;
+        private Texture2D _buttonBgHover;
+        private Texture2D _tabBg;
+        private Texture2D _tabBgActive;
         private bool _stylesReady;
         private int _proposalTargetIndex;
         private MultiplayerContractResource _proposalResource = MultiplayerContractResource.Electricity;
@@ -35,6 +44,10 @@ namespace MultiSkyLineII
         private int _activeTab;
         private Vector2 _debugScrollPosition;
         private DateTime _nextLocalStateCaptureUtc;
+        private bool _mouseControlsBlocked;
+        private InputBarrier _hudInputBarrier;
+        private static MethodInfo s_createAllBlockedBarrierMethod;
+        private static bool s_createAllBlockedBarrierResolved;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -58,6 +71,7 @@ namespace MultiSkyLineII
             var inGameplay = IsInGameplay();
             if (!inGameplay)
             {
+                ReleaseMouseControlBlock();
                 _visible = false;
                 return;
             }
@@ -66,6 +80,15 @@ namespace MultiSkyLineII
             {
                 _visible = !_visible;
             }
+
+            var hoveringHud = _visible && IsMouseOverHudWindow();
+            if (hoveringHud)
+            {
+                // Prevent camera/game controls from reacting while interacting with HUD.
+                Input.ResetInputAxes();
+            }
+
+            UpdateMouseControlBlock(hoveringHud);
         }
 
         private void OnGUI()
@@ -73,23 +96,117 @@ namespace MultiSkyLineII
             if (_networkService == null || !_networkService.IsRunning || !_visible || !IsInGameplay())
                 return;
 
+            var evt = Event.current;
+            if (evt != null && IsMouseOverHudWindow())
+            {
+                if (evt.type == EventType.ScrollWheel ||
+                    evt.type == EventType.MouseDown ||
+                    evt.type == EventType.MouseUp ||
+                    evt.type == EventType.MouseDrag ||
+                    evt.type == EventType.MouseMove ||
+                    evt.type == EventType.ContextClick)
+                {
+                    Input.ResetInputAxes();
+                    evt.Use();
+                }
+            }
+
             EnsureStyles();
             _windowRect = GUI.Window(WindowId, _windowRect, DrawWindow, $"{_windowTitle} (F8)");
+        }
 
-            var evt = Event.current;
-            if (evt == null)
-                return;
+        private bool IsMouseOverHudWindow()
+        {
+            var mouseGui = new Vector2(Input.mousePosition.x, Screen.height - Input.mousePosition.y);
+            return _windowRect.Contains(mouseGui);
+        }
 
-            if (!_windowRect.Contains(evt.mousePosition))
-                return;
-
-            // Prevent camera/world interactions while using the HUD.
-            if (evt.type == EventType.ScrollWheel ||
-                evt.type == EventType.MouseDown ||
-                evt.type == EventType.MouseUp ||
-                evt.type == EventType.MouseDrag)
+        private void UpdateMouseControlBlock(bool block)
+        {
+            try
             {
-                evt.Use();
+                var input = InputManager.instance;
+                if (input == null)
+                    return;
+
+                input.mouseOverUI = block;
+                EnsureHudInputBarrier(input);
+                if (_hudInputBarrier == null)
+                    return;
+
+                if (block && !_mouseControlsBlocked)
+                {
+                    _hudInputBarrier.mask = InputManager.DeviceType.Mouse;
+                    _hudInputBarrier.blocked = true;
+                    _mouseControlsBlocked = true;
+                }
+                else if (!block && _mouseControlsBlocked)
+                {
+                    _hudInputBarrier.blocked = false;
+                    _mouseControlsBlocked = false;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        private void ReleaseMouseControlBlock()
+        {
+            if (!_mouseControlsBlocked)
+                return;
+
+            try
+            {
+                var input = InputManager.instance;
+                if (input != null)
+                {
+                    input.mouseOverUI = false;
+                    if (_hudInputBarrier != null)
+                    {
+                        _hudInputBarrier.blocked = false;
+                    }
+                }
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _mouseControlsBlocked = false;
+            }
+        }
+
+        private void EnsureHudInputBarrier(InputManager input)
+        {
+            if (_hudInputBarrier != null)
+                return;
+
+            try
+            {
+                if (!s_createAllBlockedBarrierResolved)
+                {
+                    s_createAllBlockedBarrierMethod = input.GetType().GetMethod(
+                        "CreateAllBlockedBarrier",
+                        BindingFlags.Instance | BindingFlags.Public,
+                        null,
+                        new[] { typeof(string) },
+                        null);
+                    s_createAllBlockedBarrierResolved = true;
+                }
+
+                if (s_createAllBlockedBarrierMethod != null)
+                {
+                    _hudInputBarrier = s_createAllBlockedBarrierMethod.Invoke(input, new object[] { "MultiSkyLineII_HUD" }) as InputBarrier;
+                    if (_hudInputBarrier != null)
+                    {
+                        _hudInputBarrier.mask = InputManager.DeviceType.Mouse;
+                        _hudInputBarrier.blocked = false;
+                    }
+                }
+            }
+            catch
+            {
             }
         }
 
@@ -108,16 +225,20 @@ namespace MultiSkyLineII
             if (_stylesReady)
                 return;
 
-            _windowBg = CreateSolidTexture(new Color32(16, 22, 31, 230));
-            _cardBg = CreateSolidTexture(new Color32(27, 35, 48, 238));
-            _meterBg = CreateSolidTexture(new Color32(55, 69, 88, 255));
+            _windowBg = CreateSolidTexture(new Color32(30, 36, 45, 236));
+            _cardBg = CreateSolidTexture(new Color32(45, 54, 66, 238));
+            _meterBg = CreateSolidTexture(new Color32(79, 92, 110, 255));
             _meterFillGood = CreateSolidTexture(new Color32(73, 194, 146, 255));
             _meterFillWarn = CreateSolidTexture(new Color32(232, 180, 62, 255));
             _meterFillBad = CreateSolidTexture(new Color32(223, 89, 89, 255));
+            _buttonBg = CreateSolidTexture(new Color32(63, 119, 185, 255));
+            _buttonBgHover = CreateSolidTexture(new Color32(84, 138, 201, 255));
+            _tabBg = CreateSolidTexture(new Color32(57, 66, 80, 255));
+            _tabBgActive = CreateSolidTexture(new Color32(79, 137, 202, 255));
 
             _windowStyle = new GUIStyle(GUI.skin.window);
             _windowStyle.normal.background = _windowBg;
-            _windowStyle.fontSize = 14;
+            _windowStyle.fontSize = 15;
             _windowStyle.padding = new RectOffset(12, 12, 28, 12);
 
             _titleStyle = new GUIStyle(GUI.skin.label);
@@ -144,6 +265,22 @@ namespace MultiSkyLineII
             _smallStyle.fontSize = 11;
             _smallStyle.normal.textColor = new Color32(153, 173, 194, 255);
 
+            _buttonStyle = new GUIStyle(GUI.skin.button);
+            _buttonStyle.normal.background = _buttonBg;
+            _buttonStyle.hover.background = _buttonBgHover;
+            _buttonStyle.active.background = _buttonBgHover;
+            _buttonStyle.normal.textColor = new Color32(242, 247, 252, 255);
+            _buttonStyle.fontSize = 12;
+            _buttonStyle.padding = new RectOffset(8, 8, 4, 4);
+
+            _tabStyle = new GUIStyle(_buttonStyle);
+            _tabStyle.normal.background = _tabBg;
+            _tabStyle.hover.background = _buttonBgHover;
+
+            _tabActiveStyle = new GUIStyle(_buttonStyle);
+            _tabActiveStyle.normal.background = _tabBgActive;
+            _tabActiveStyle.hover.background = _tabBgActive;
+
             _stylesReady = true;
         }
 
@@ -157,7 +294,7 @@ namespace MultiSkyLineII
 
         private void DrawWindow(int _)
         {
-            if (GUI.Button(new Rect(_windowRect.width - 28f, 4f, 22f, 18f), "X"))
+            if (GUI.Button(new Rect(_windowRect.width - 30f, 4f, 24f, 18f), "X", _buttonStyle))
             {
                 _visible = false;
                 return;
@@ -173,18 +310,18 @@ namespace MultiSkyLineII
             GUI.Label(new Rect(16f, 36f, 280f, 22f), "Session Multiplayer", _titleStyle);
             GUI.Label(new Rect(_windowRect.width - 170f, 40f, 150f, 18f), $"Mode: {modeText}", _metaStyle);
             GUI.Label(new Rect(16f, 56f, _windowRect.width - 32f, 16f), $"Destination: {destinationText}", _smallStyle);
-            if (GUI.Button(new Rect(16f, 72f, 72f, 20f), "Vue"))
+            if (GUI.Button(new Rect(16f, 72f, 88f, 22f), "Vue", _activeTab == 0 ? _tabActiveStyle : _tabStyle))
             {
                 _activeTab = 0;
             }
-            if (GUI.Button(new Rect(92f, 72f, 72f, 20f), "Debug"))
+            if (GUI.Button(new Rect(108f, 72f, 88f, 22f), "Debug", _activeTab == 1 ? _tabActiveStyle : _tabStyle))
             {
                 _activeTab = 1;
             }
 
-            var contentTop = 96f;
+            var contentTop = 100f;
             var viewWidth = _windowRect.width - 40f;
-            var viewHeight = Mathf.Max(150f, _windowRect.height - 90f);
+            var viewHeight = Mathf.Max(180f, _windowRect.height - 120f);
             if (_activeTab == 1)
             {
                 DrawDebugTab(contentTop, viewWidth, viewHeight);
@@ -227,7 +364,7 @@ namespace MultiSkyLineII
         private void DrawDebugTab(float contentTop, float viewWidth, float viewHeight)
         {
             var logs = _networkService.GetDebugLogLines();
-            if (GUI.Button(new Rect(_windowRect.width - 96f, 72f, 80f, 20f), "Clear"))
+            if (GUI.Button(new Rect(_windowRect.width - 96f, 72f, 80f, 20f), "Clear", _buttonStyle))
             {
                 _networkService.ClearDebugLog();
             }
@@ -272,7 +409,7 @@ namespace MultiSkyLineII
                 if (string.Equals(c.SellerPlayer, local, StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(c.BuyerPlayer, local, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (GUI.Button(new Rect(width - 100f, lineY, 84f, 20f), "Annuler"))
+                    if (GUI.Button(new Rect(width - 100f, lineY, 84f, 20f), "Annuler", _buttonStyle))
                     {
                         var ok = _networkService.TryCancelContract(c.Id, out var error);
                         _proposalFeedback = ok ? "Contrat annule." : $"Erreur: {error}";
@@ -320,12 +457,12 @@ namespace MultiSkyLineII
             }
 
             var exportMax = sellerFound ? GetExportableUnits(sellerState, _proposalResource) : 0;
-            if (GUI.Button(new Rect(12f, y + 30f, 210f, 22f), $"Acheter a: {selectedTarget}"))
+            if (GUI.Button(new Rect(12f, y + 30f, 210f, 22f), $"Acheter a: {selectedTarget}", _buttonStyle))
             {
                 _proposalTargetIndex = (_proposalTargetIndex + 1) % targetNames.Count;
             }
 
-            if (GUI.Button(new Rect(228f, y + 30f, 120f, 22f), $"Ressource: {GetResourceLabel(_proposalResource)}"))
+            if (GUI.Button(new Rect(228f, y + 30f, 132f, 22f), $"Ressource: {GetResourceLabel(_proposalResource)}", _buttonStyle))
             {
                 _proposalResource = (MultiplayerContractResource)(((int)_proposalResource + 1) % 3);
             }
@@ -339,7 +476,7 @@ namespace MultiSkyLineII
             _proposalPrice = GUI.HorizontalSlider(new Rect(125f, y + 84f, 220f, 14f), _proposalPrice, 1f, 10000f);
 
             GUI.Label(new Rect(12f, y + 102f, width - 220f, 16f), "Contrat indefini (annulation manuelle).", _smallStyle);
-            if (GUI.Button(new Rect(width - 156f, y + 98f, 140f, 22f), "Envoyer contrat"))
+            if (GUI.Button(new Rect(width - 156f, y + 98f, 140f, 22f), "Envoyer contrat", _buttonStyle))
             {
                 if (exportMax <= 0)
                 {
@@ -387,14 +524,14 @@ namespace MultiSkyLineII
 
                 if (string.Equals(p.SellerPlayer, local.Name, StringComparison.OrdinalIgnoreCase))
                 {
-                    if (GUI.Button(new Rect(width - 184f, lineY, 84f, 20f), "Accepter"))
+                    if (GUI.Button(new Rect(width - 184f, lineY, 84f, 20f), "Accepter", _buttonStyle))
                     {
                         var ok = _networkService.TryRespondToProposal(p.Id, true, out var error);
                         _proposalFeedback = ok ? "Demande acceptee." : $"Erreur: {error}";
                         _proposalFeedbackUntilUtc = DateTime.UtcNow.AddSeconds(3);
                     }
 
-                    if (GUI.Button(new Rect(width - 94f, lineY, 78f, 20f), "Refuser"))
+                    if (GUI.Button(new Rect(width - 94f, lineY, 78f, 20f), "Refuser", _buttonStyle))
                     {
                         var ok = _networkService.TryRespondToProposal(p.Id, false, out var error);
                         _proposalFeedback = ok ? "Demande refusee." : $"Erreur: {error}";
@@ -533,6 +670,7 @@ namespace MultiSkyLineII
 
         private void OnDestroy()
         {
+            ReleaseMouseControlBlock();
             if (_windowBg != null)
                 Destroy(_windowBg);
             if (_cardBg != null)
@@ -545,9 +683,25 @@ namespace MultiSkyLineII
                 Destroy(_meterFillWarn);
             if (_meterFillBad != null)
                 Destroy(_meterFillBad);
+            if (_buttonBg != null)
+                Destroy(_buttonBg);
+            if (_buttonBgHover != null)
+                Destroy(_buttonBgHover);
+            if (_tabBg != null)
+                Destroy(_tabBg);
+            if (_tabBgActive != null)
+                Destroy(_tabBgActive);
+            if (_hudInputBarrier != null)
+            {
+                _hudInputBarrier.Dispose();
+                _hudInputBarrier = null;
+            }
         }
     }
 }
+
+
+
 
 
 
