@@ -1,61 +1,60 @@
-﻿<Publish>
-	<!--Id must be set in order to update existed mod. it is not required for publishing mod for the first time-->
-	<ModId Value="135482" />
-	<!--Name of the mod to display to players-->
-	<DisplayName Value="MultiSkyLinesII" />
-	<!--Short description of the mod-->
-	<ShortDescription Value="Multiplayer mod for City Skylines II" />
-	<!--Long description of the mod. Single line or multi line. Supports minimal markdown subset-->
-	<!--LongDescription Value="This is a long description" /-->
-	<LongDescription>
-		## MultiSkyLinesII
-		Bring your cities together with a real-time multiplayer resource trading experience.
+<Publish>
+  <!--Id must be set in order to update existed mod. it is not required for publishing mod for the first time-->
+  <ModId Value="135482" />
+  <!--Name of the mod to display to players-->
+  <DisplayName Value="MultiSkyLinesII" />
+  <!--Short description of the mod-->
+  <ShortDescription Value="Multiplayer mod for City Skylines II" />
+  <!--Long description of the mod. Loaded from Properties/LongDescription.md during build-->
+  <LongDescription># MultiSkyLinesII
 
-		### Current status
-		- Prototype / Work in progress
-		- Features are evolving quickly
-		- Multiplayer sessions may still have bugs
+Bring your cities together with a real-time multiplayer resource trading experience.
 
-		### Main features
-		- Host / Client multiplayer mode
-		- Live player HUD (stats, contracts, debug)
-		- Contract system for Electricity, Water, and Sewage
-		- Per-tick settlements and synchronized contract events
+### Current status
+- Prototype / Work in progress
+- Features are evolving quickly
+- Multiplayer sessions may still have bugs
 
-		### Quick start
-		1. Open the mod settings and configure Host or Client mode.
-		2. Keep port `25565` open and reachable for remote clients.
-		3. Start or join a city session.
-		4. Press `F8` in-game to open/close the multiplayer HUD.
+### Main features
+- Host / Client multiplayer mode
+- Live player HUD (stats, contracts, debug)
+- Contract system for Electricity, Water, and Sewage
+- Per-tick settlements and synchronized contract events
 
-		### Notes
-		- This mod is not considered stable yet.
-		- For remote play, use the host public/local IP (not localhost).
-		- If anything desyncs, check the HUD Debug tab logs first.
-	</LongDescription>
-	<!--Thumbnail-->
-	<Thumbnail Value="Properties/Thumbnail.png" />
-	<!--Screenshot, can be set multiple times-->
-	<Screenshot Value="" />
-	<!--Tag, can be set multiple times-->
-	<Tag Value="" />
-	<!--Link to the forum post where the mod can be discussed-->
-	<ForumLink Value="" />
-	<!--Version of the mod-->
-	<ModVersion Value="1.38" />
-	<!--Recommended version of the base game to use the mod-->
-	<GameVersion Value="1.5.*" />
-	<!--Dependency for the mod, can be set multiple times-->
-	<Dependency Id="" />
-	<!--Required DLC, can be set multiple times. Supported values are "Landmark Buildings", "San Fransisco Set", "Beach Properties", "Urban Promenades", "Modern Architecture"-->
-	<RequiredDLC Value="" />
-	<!--Change log for new version. Single line or multi line. Supports minimal markdown subset-->
-	<ChangeLog Value="MultiSkyLinesII" />
-	<ChangeLog>
-		Working on new HUD
-	</ChangeLog>
-	<!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
-	<ExternalLink Type="" Url="" />
-	<!--Supported values Public, Private, Unlisted-->
-	<AccessLevel Value="Public" />
+### Quick start
+1. Open the mod settings and configure Host or Client mode.
+2. Keep port `25565` open and reachable for remote clients.
+3. Start or join a city session.
+4. Press `F8` in-game to open/close the multiplayer HUD.
+
+### Notes
+- This mod is not considered stable yet.
+- For remote play, use the host public/local IP (not localhost).
+- If anything desyncs, check the HUD Debug tab logs first.</LongDescription>
+  <!--Thumbnail-->
+  <Thumbnail Value="Properties/Thumbnail.png" />
+  <!--Screenshot, can be set multiple times-->
+  <Screenshot Value="" />
+  <!--Tag, can be set multiple times-->
+  <Tag Value="Code Mod" />
+  <!--Link to the forum post where the mod can be discussed-->
+  <ForumLink Value="" />
+  <!--Version of the mod-->
+  <ModVersion Value="1.45" />
+  <!--Recommended version of the base game to use the mod-->
+  <GameVersion Value="1.5.*" />
+  <!--Dependency for the mod, can be set multiple times-->
+  <Dependency Id="" />
+  <!--Required DLC, can be set multiple times. Supported values are "Landmark Buildings", "San Fransisco Set", "Beach Properties", "Urban Promenades", "Modern Architecture"-->
+  <RequiredDLC Value="" />
+  <!--Change log for new version. Loaded from Properties/ChangeLog.md during build-->
+  <ChangeLog>## 1.44
+
+- Removed contracts experimental toggle: contracts are now always active.
+- Kept native CS2 UI and custom exchange hub flow active by default.
+- Stability and diagnostics improvements on UI/network bridge.</ChangeLog>
+  <!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
+  <ExternalLink Type="" Url="" />
+  <!--Supported values Public, Private, Unlisted-->
+  <AccessLevel Value="Public" />
 </Publish>

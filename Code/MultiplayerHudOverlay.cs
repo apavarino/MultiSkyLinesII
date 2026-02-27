@@ -866,7 +866,7 @@ namespace MultiSkyLineII
             var dateText = string.IsNullOrWhiteSpace(s.SimulationDateText) ? "n/a" : s.SimulationDateText;
             GUI.Label(new Rect(14f, y + 44f, width - 30f, 16f), $"Simulation {speedText}   -   Date {dateText}", _smallStyle);
             GUI.Label(new Rect(14f, y + 58f, width - 30f, 16f),
-                $"Frontieres distinctes -> Electricite: {(s.HasElectricityOutsideConnection ? "OK" : "KO")} | Eau: {(s.HasWaterOutsideConnection ? "OK" : "KO")} | Eaux usees: {(s.HasSewageOutsideConnection ? "OK" : "KO")}",
+                $"Interconnexions -> Eau: {(s.HasWaterOutsideConnection ? "OK" : "KO")} | Eaux usees: {(s.HasSewageOutsideConnection ? "OK" : "KO")} | Elec: reseau local",
                 _smallStyle);
 
             DrawMeter("Electricite", MultiplayerContractResource.Electricity, s.ElectricityFulfilledConsumption, s.ElectricityConsumption, s.ElectricityProduction, "prod", y + 76f, width);
@@ -879,8 +879,6 @@ namespace MultiSkyLineII
             switch (resource)
             {
                 case MultiplayerContractResource.Electricity:
-                    if (!s.HasElectricityOutsideConnection)
-                        return 0;
                     return Math.Max(0, s.ElectricityProduction - s.ElectricityConsumption);
                 case MultiplayerContractResource.FreshWater:
                     if (!s.HasWaterOutsideConnection)

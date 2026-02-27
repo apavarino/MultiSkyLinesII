@@ -35,6 +35,15 @@ namespace MultiSkyLineII
     public static class MultiplayerResourceReader
     {
         private static readonly BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        private static readonly object UtilitySync = new object();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedWaterByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedSewageByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedWaterEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedSewageEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubProducerByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubConsumerByEntity = new System.Collections.Generic.Dictionary<long, int>();
 
         public static bool HasActiveCity()
         {
@@ -191,6 +200,575 @@ namespace MultiSkyLineII
             {
                 return false;
             }
+        }
+
+        public static bool TrySetUtilityCapacityTarget(int electricityTarget, int waterTarget, int sewageTarget, out int appliedElectricity, out int appliedWater, out int appliedSewage)
+        {
+            appliedElectricity = 0;
+            appliedWater = 0;
+            appliedSewage = 0;
+
+            try
+            {
+                var world = World.DefaultGameObjectInjectionWorld;
+                if (world == null)
+                    return false;
+
+                var entityManager = world.EntityManager;
+                lock (UtilitySync)
+                {
+                    var elecImportTarget = Math.Max(0, electricityTarget);
+                    var elecExportTarget = Math.Max(0, -electricityTarget);
+                    // Apply contracts on dedicated in-city exchange hubs (transformer buildings connected to power grid).
+                    var elecProducerDelta = SetElectricityHubProducerTarget(entityManager, elecImportTarget);
+                    var elecConsumerDelta = SetElectricityHubConsumerTarget(entityManager, elecExportTarget);
+                    appliedElectricity = elecProducerDelta - elecConsumerDelta;
+
+                    var waterProducerDelta = SetWaterPumpTarget(entityManager, Math.Min(0, waterTarget));
+                    var waterEdgeDelta = SetWaterOutsideEdgeTarget(entityManager, Math.Max(0, waterTarget), false);
+                    appliedWater = waterProducerDelta + waterEdgeDelta;
+
+                    var sewageProducerDelta = SetSewageOutletTarget(entityManager, Math.Min(0, sewageTarget));
+                    var sewageEdgeDelta = SetWaterOutsideEdgeTarget(entityManager, Math.Max(0, sewageTarget), true);
+                    appliedSewage = sewageProducerDelta + sewageEdgeDelta;
+                }
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static int SetElectricityProducerTarget(EntityManager entityManager, int target)
+        {
+            var query = entityManager.CreateEntityQuery(ComponentType.ReadWrite<ElectricityProducer>());
+            return ReconcileProducerCapacityTarget(
+                query.ToEntityArray(Unity.Collections.Allocator.Temp),
+                target,
+                AppliedElecByEntity,
+                entity => entityManager.GetComponentData<ElectricityProducer>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var c = entityManager.GetComponentData<ElectricityProducer>(entity);
+                    c.m_Capacity = value;
+                    entityManager.SetComponentData(entity, c);
+                });
+        }
+
+        private static int SetWaterPumpTarget(EntityManager entityManager, int target)
+        {
+            var query = entityManager.CreateEntityQuery(ComponentType.ReadWrite<WaterPumpingStation>());
+            return ReconcileProducerCapacityTarget(
+                query.ToEntityArray(Unity.Collections.Allocator.Temp),
+                target,
+                AppliedWaterByEntity,
+                entity => entityManager.GetComponentData<WaterPumpingStation>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var c = entityManager.GetComponentData<WaterPumpingStation>(entity);
+                    c.m_Capacity = value;
+                    entityManager.SetComponentData(entity, c);
+                });
+        }
+
+        private static int SetSewageOutletTarget(EntityManager entityManager, int target)
+        {
+            var query = entityManager.CreateEntityQuery(ComponentType.ReadWrite<SewageOutlet>());
+            return ReconcileProducerCapacityTarget(
+                query.ToEntityArray(Unity.Collections.Allocator.Temp),
+                target,
+                AppliedSewageByEntity,
+                entity => entityManager.GetComponentData<SewageOutlet>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var c = entityManager.GetComponentData<SewageOutlet>(entity);
+                    c.m_Capacity = value;
+                    entityManager.SetComponentData(entity, c);
+                });
+        }
+
+        private static int SetElectricityOutsideEdgeTarget(EntityManager entityManager, int target)
+        {
+            var edges = CollectElectricityOutsideEdges(entityManager);
+            return ReconcileEdgeCapacityTarget(
+                edges,
+                target,
+                AppliedElecEdgeByEntity,
+                entity => entityManager.GetComponentData<ElectricityFlowEdge>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var edge = entityManager.GetComponentData<ElectricityFlowEdge>(entity);
+                    edge.m_Capacity = value;
+                    entityManager.SetComponentData(entity, edge);
+                });
+        }
+
+        private static int SetElectricityHubProducerTarget(EntityManager entityManager, int target)
+        {
+            var hubs = CollectElectricityHubEntities(entityManager);
+            if (hubs.Count == 0)
+            {
+                AppliedElecHubProducerByEntity.Clear();
+                return 0;
+            }
+
+            EnsureElectricityHubComponents(entityManager, hubs, ensureProducer: true, ensureConsumer: false);
+            return ReconcileProducerCapacityTarget(
+                ToNativeArray(hubs),
+                target,
+                AppliedElecHubProducerByEntity,
+                entity => entityManager.GetComponentData<ElectricityProducer>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var c = entityManager.GetComponentData<ElectricityProducer>(entity);
+                    c.m_Capacity = value;
+                    entityManager.SetComponentData(entity, c);
+                });
+        }
+
+        private static int SetElectricityHubConsumerTarget(EntityManager entityManager, int target)
+        {
+            var hubs = CollectElectricityHubEntities(entityManager);
+            if (hubs.Count == 0)
+            {
+                AppliedElecHubConsumerByEntity.Clear();
+                return 0;
+            }
+
+            EnsureElectricityHubComponents(entityManager, hubs, ensureProducer: false, ensureConsumer: true);
+            return ReconcileElectricityConsumerTarget(
+                ToNativeArray(hubs),
+                target,
+                AppliedElecHubConsumerByEntity,
+                entity => entityManager.GetComponentData<ElectricityConsumer>(entity),
+                (entity, value) => entityManager.SetComponentData(entity, value));
+        }
+
+        private static int SetWaterOutsideEdgeTarget(EntityManager entityManager, int target, bool sewage)
+        {
+            var edges = CollectWaterOutsideEdges(entityManager);
+            return ReconcileEdgeCapacityTarget(
+                edges,
+                target,
+                sewage ? AppliedSewageEdgeByEntity : AppliedWaterEdgeByEntity,
+                entity =>
+                {
+                    var edge = entityManager.GetComponentData<WaterPipeEdge>(entity);
+                    return sewage ? edge.m_SewageCapacity : edge.m_FreshCapacity;
+                },
+                (entity, value) =>
+                {
+                    var edge = entityManager.GetComponentData<WaterPipeEdge>(entity);
+                    if (sewage)
+                        edge.m_SewageCapacity = value;
+                    else
+                        edge.m_FreshCapacity = value;
+                    entityManager.SetComponentData(entity, edge);
+                });
+        }
+
+        private static int ReconcileProducerCapacityTarget(
+            Unity.Collections.NativeArray<Entity> entities,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity,
+            Func<Entity, int> getCapacity,
+            Action<Entity, int> setCapacity)
+        {
+            try
+            {
+                if (entities.Length == 0)
+                {
+                    appliedByEntity.Clear();
+                    return 0;
+                }
+
+                var count = entities.Length;
+                var keys = new long[count];
+                var current = new int[count];
+                var baseCapacity = new int[count];
+                var desiredApplied = new int[count];
+                var presentKeys = new System.Collections.Generic.HashSet<long>();
+
+                for (var i = 0; i < count; i++)
+                {
+                    var entity = entities[i];
+                    var key = GetEntityKey(entity);
+                    keys[i] = key;
+                    presentKeys.Add(key);
+                    current[i] = Math.Max(0, getCapacity(entity));
+                    var prevApplied = appliedByEntity.TryGetValue(key, out var prev) ? prev : 0;
+                    baseCapacity[i] = Math.Max(0, current[i] - prevApplied);
+                    desiredApplied[i] = 0;
+                }
+
+                if (target > 0)
+                {
+                    desiredApplied[0] = target;
+                }
+                else if (target < 0)
+                {
+                    var remaining = -target;
+                    for (var i = 0; i < count && remaining > 0; i++)
+                    {
+                        var removable = Math.Min(baseCapacity[i], remaining);
+                        if (removable <= 0)
+                            continue;
+
+                        desiredApplied[i] = -removable;
+                        remaining -= removable;
+                    }
+                }
+
+                var totalAppliedChange = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    var nextCapacity = Math.Max(0, baseCapacity[i] + desiredApplied[i]);
+                    if (nextCapacity != current[i])
+                    {
+                        setCapacity(entities[i], nextCapacity);
+                    }
+
+                    totalAppliedChange += nextCapacity - current[i];
+                    if (desiredApplied[i] == 0)
+                        appliedByEntity.Remove(keys[i]);
+                    else
+                        appliedByEntity[keys[i]] = desiredApplied[i];
+                }
+
+                var staleKeys = new System.Collections.Generic.List<long>();
+                foreach (var key in appliedByEntity.Keys)
+                {
+                    if (!presentKeys.Contains(key))
+                        staleKeys.Add(key);
+                }
+
+                for (var i = 0; i < staleKeys.Count; i++)
+                {
+                    appliedByEntity.Remove(staleKeys[i]);
+                }
+
+                return totalAppliedChange;
+            }
+            finally
+            {
+                entities.Dispose();
+            }
+        }
+
+        private static int ReconcileEdgeCapacityTarget(
+            System.Collections.Generic.List<Entity> edges,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity,
+            Func<Entity, int> getCapacity,
+            Action<Entity, int> setCapacity)
+        {
+            if (edges == null || edges.Count == 0)
+            {
+                appliedByEntity.Clear();
+                return 0;
+            }
+
+            var count = edges.Count;
+            var keys = new long[count];
+            var current = new int[count];
+            var baseCapacity = new int[count];
+            var desiredApplied = new int[count];
+            var presentKeys = new System.Collections.Generic.HashSet<long>();
+
+            for (var i = 0; i < count; i++)
+            {
+                var edge = edges[i];
+                var key = GetEntityKey(edge);
+                keys[i] = key;
+                presentKeys.Add(key);
+                current[i] = Math.Max(0, getCapacity(edge));
+                var prevApplied = appliedByEntity.TryGetValue(key, out var prev) ? prev : 0;
+                baseCapacity[i] = Math.Max(0, current[i] - prevApplied);
+                desiredApplied[i] = 0;
+            }
+
+            if (target > 0)
+            {
+                desiredApplied[0] = target;
+            }
+            else if (target < 0)
+            {
+                var remaining = -target;
+                for (var i = 0; i < count && remaining > 0; i++)
+                {
+                    var removable = Math.Min(baseCapacity[i], remaining);
+                    if (removable <= 0)
+                        continue;
+                    desiredApplied[i] = -removable;
+                    remaining -= removable;
+                }
+            }
+
+            var totalAppliedChange = 0;
+            for (var i = 0; i < count; i++)
+            {
+                var nextCapacity = Math.Max(0, baseCapacity[i] + desiredApplied[i]);
+                if (nextCapacity != current[i])
+                {
+                    setCapacity(edges[i], nextCapacity);
+                }
+
+                totalAppliedChange += nextCapacity - current[i];
+                if (desiredApplied[i] == 0)
+                    appliedByEntity.Remove(keys[i]);
+                else
+                    appliedByEntity[keys[i]] = desiredApplied[i];
+            }
+
+            var staleKeys = new System.Collections.Generic.List<long>();
+            foreach (var key in appliedByEntity.Keys)
+            {
+                if (!presentKeys.Contains(key))
+                    staleKeys.Add(key);
+            }
+            for (var i = 0; i < staleKeys.Count; i++)
+            {
+                appliedByEntity.Remove(staleKeys[i]);
+            }
+
+            return totalAppliedChange;
+        }
+
+        private static int ReconcileElectricityConsumerTarget(
+            Unity.Collections.NativeArray<Entity> entities,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity,
+            Func<Entity, ElectricityConsumer> getConsumer,
+            Action<Entity, ElectricityConsumer> setConsumer)
+        {
+            try
+            {
+                if (entities.Length == 0)
+                {
+                    appliedByEntity.Clear();
+                    return 0;
+                }
+
+                var count = entities.Length;
+                var keys = new long[count];
+                var current = new int[count];
+                var baseWanted = new int[count];
+                var desiredApplied = new int[count];
+                var presentKeys = new System.Collections.Generic.HashSet<long>();
+
+                for (var i = 0; i < count; i++)
+                {
+                    var entity = entities[i];
+                    var key = GetEntityKey(entity);
+                    keys[i] = key;
+                    presentKeys.Add(key);
+                    var consumer = getConsumer(entity);
+                    current[i] = Math.Max(0, consumer.m_WantedConsumption);
+                    var prevApplied = appliedByEntity.TryGetValue(key, out var prev) ? prev : 0;
+                    baseWanted[i] = Math.Max(0, current[i] - prevApplied);
+                    desiredApplied[i] = 0;
+                }
+
+                if (target > 0)
+                {
+                    desiredApplied[0] = target;
+                }
+                else if (target < 0)
+                {
+                    var remaining = -target;
+                    for (var i = 0; i < count && remaining > 0; i++)
+                    {
+                        var removable = Math.Min(baseWanted[i], remaining);
+                        if (removable <= 0)
+                            continue;
+
+                        desiredApplied[i] = -removable;
+                        remaining -= removable;
+                    }
+                }
+
+                var totalAppliedChange = 0;
+                for (var i = 0; i < count; i++)
+                {
+                    var nextWanted = Math.Max(0, baseWanted[i] + desiredApplied[i]);
+                    if (nextWanted != current[i])
+                    {
+                        var consumer = getConsumer(entities[i]);
+                        consumer.m_WantedConsumption = nextWanted;
+                        if (consumer.m_FulfilledConsumption > nextWanted)
+                            consumer.m_FulfilledConsumption = nextWanted;
+                        setConsumer(entities[i], consumer);
+                    }
+
+                    totalAppliedChange += nextWanted - current[i];
+                    if (desiredApplied[i] == 0)
+                        appliedByEntity.Remove(keys[i]);
+                    else
+                        appliedByEntity[keys[i]] = desiredApplied[i];
+                }
+
+                var staleKeys = new System.Collections.Generic.List<long>();
+                foreach (var key in appliedByEntity.Keys)
+                {
+                    if (!presentKeys.Contains(key))
+                        staleKeys.Add(key);
+                }
+
+                for (var i = 0; i < staleKeys.Count; i++)
+                {
+                    appliedByEntity.Remove(staleKeys[i]);
+                }
+
+                return totalAppliedChange;
+            }
+            finally
+            {
+                entities.Dispose();
+            }
+        }
+
+        private static System.Collections.Generic.List<Entity> CollectElectricityOutsideEdges(EntityManager entityManager)
+        {
+            var result = new System.Collections.Generic.List<Entity>();
+            var tradeNodes = entityManager.CreateEntityQuery(
+                ComponentType.ReadOnly<TradeNode>(),
+                ComponentType.ReadOnly<ElectricityFlowNode>(),
+                ComponentType.ReadOnly<ConnectedFlowEdge>());
+
+            if (tradeNodes.IsEmptyIgnoreFilter)
+                return result;
+
+            var nodes = tradeNodes.ToEntityArray(Unity.Collections.Allocator.Temp);
+            try
+            {
+                for (var i = 0; i < nodes.Length; i++)
+                {
+                    var connected = entityManager.GetBuffer<ConnectedFlowEdge>(nodes[i]);
+                    for (var j = 0; j < connected.Length; j++)
+                    {
+                        var edgeEntity = connected[j].m_Edge;
+                        if (!entityManager.HasComponent<ElectricityFlowEdge>(edgeEntity))
+                            continue;
+                        result.Add(edgeEntity);
+                    }
+                }
+            }
+            finally
+            {
+                nodes.Dispose();
+            }
+
+            return result;
+        }
+
+        private static System.Collections.Generic.List<Entity> CollectElectricityHubEntities(EntityManager entityManager)
+        {
+            var result = new System.Collections.Generic.List<Entity>();
+            var query = entityManager.CreateEntityQuery(
+                ComponentType.ReadOnly<Transformer>(),
+                ComponentType.ReadOnly<Game.Prefabs.PrefabRef>());
+            if (query.IsEmptyIgnoreFilter)
+                return result;
+
+            var hubPrefab = ExchangeHubPrefabBootstrapSystem.ExchangeHubPrefabEntity;
+            if (hubPrefab == Entity.Null)
+                return result;
+
+            var entities = query.ToEntityArray(Unity.Collections.Allocator.Temp);
+            try
+            {
+                for (var i = 0; i < entities.Length; i++)
+                {
+                    var prefabRef = entityManager.GetComponentData<Game.Prefabs.PrefabRef>(entities[i]);
+                    if (prefabRef.m_Prefab != hubPrefab)
+                        continue;
+
+                    result.Add(entities[i]);
+                }
+            }
+            finally
+            {
+                entities.Dispose();
+            }
+
+            return result;
+        }
+
+        private static void EnsureElectricityHubComponents(EntityManager entityManager, System.Collections.Generic.List<Entity> hubs, bool ensureProducer, bool ensureConsumer)
+        {
+            for (var i = 0; i < hubs.Count; i++)
+            {
+                var hub = hubs[i];
+                if (ensureProducer && !entityManager.HasComponent<ElectricityProducer>(hub))
+                {
+                    entityManager.AddComponentData(hub, new ElectricityProducer
+                    {
+                        m_Capacity = 0,
+                        m_LastProduction = 0
+                    });
+                }
+
+                if (ensureConsumer && !entityManager.HasComponent<ElectricityConsumer>(hub))
+                {
+                    entityManager.AddComponentData(hub, new ElectricityConsumer
+                    {
+                        m_WantedConsumption = 0,
+                        m_FulfilledConsumption = 0,
+                        m_CooldownCounter = 0,
+                        m_Flags = default
+                    });
+                }
+            }
+        }
+
+        private static Unity.Collections.NativeArray<Entity> ToNativeArray(System.Collections.Generic.List<Entity> entities)
+        {
+            var array = new Unity.Collections.NativeArray<Entity>(entities.Count, Unity.Collections.Allocator.Temp);
+            for (var i = 0; i < entities.Count; i++)
+            {
+                array[i] = entities[i];
+            }
+            return array;
+        }
+
+        private static System.Collections.Generic.List<Entity> CollectWaterOutsideEdges(EntityManager entityManager)
+        {
+            var result = new System.Collections.Generic.List<Entity>();
+            var tradeNodes = entityManager.CreateEntityQuery(
+                ComponentType.ReadOnly<TradeNode>(),
+                ComponentType.ReadOnly<WaterPipeNode>(),
+                ComponentType.ReadOnly<ConnectedFlowEdge>());
+
+            if (tradeNodes.IsEmptyIgnoreFilter)
+                return result;
+
+            var nodes = tradeNodes.ToEntityArray(Unity.Collections.Allocator.Temp);
+            try
+            {
+                for (var i = 0; i < nodes.Length; i++)
+                {
+                    var connected = entityManager.GetBuffer<ConnectedFlowEdge>(nodes[i]);
+                    for (var j = 0; j < connected.Length; j++)
+                    {
+                        var edgeEntity = connected[j].m_Edge;
+                        if (!entityManager.HasComponent<WaterPipeEdge>(edgeEntity))
+                            continue;
+                        result.Add(edgeEntity);
+                    }
+                }
+            }
+            finally
+            {
+                nodes.Dispose();
+            }
+
+            return result;
+        }
+
+        private static long GetEntityKey(Entity entity)
+        {
+            return ((long)entity.Index << 32) | (uint)entity.Version;
         }
 
         private static int ApplyElectricityProducerDelta(EntityManager entityManager, int delta)

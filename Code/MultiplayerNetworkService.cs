@@ -35,9 +35,6 @@ namespace MultiSkyLineII
         private MultiplayerResourceState _latestMainThreadLocalState;
         private bool _hasMainThreadLocalState;
         private int _pendingLocalMoneyDelta;
-        private int _appliedLocalElectricityCapacityDelta;
-        private int _appliedLocalWaterCapacityDelta;
-        private int _appliedLocalSewageCapacityDelta;
         private long _nextSettlementEventId = 1;
         private long _lastAppliedSettlementEventId;
         private DateTime _nextSettlementUtc = DateTime.UtcNow;
@@ -149,16 +146,32 @@ namespace MultiSkyLineII
 
             if (settings.HostMode)
             {
-                Task.Run(() => RunHostLoop(_configuredBindAddress, _configuredPort, token), token);
+                RunDetached("host-loop", () => RunHostLoop(_configuredBindAddress, _configuredPort, token), token);
                 _log.Info($"Multiplayer host started on {_configuredBindAddress}:{_configuredPort}");
                 AddDebugLog($"Host started on {_configuredBindAddress}:{_configuredPort}");
             }
             else
             {
-                Task.Run(() => RunClientLoop(_configuredServerAddress, _configuredPort, token), token);
+                RunDetached("client-loop", () => RunClientLoop(_configuredServerAddress, _configuredPort, token), token);
                 _log.Info($"Multiplayer client started for {_configuredServerAddress}:{_configuredPort}");
                 AddDebugLog($"Client started for {_configuredServerAddress}:{_configuredPort}");
             }
+        }
+
+        private void RunDetached(string name, Func<Task> taskFactory, CancellationToken token)
+        {
+            _ = Task.Run(taskFactory, CancellationToken.None).ContinueWith(t =>
+            {
+                if (t.IsCanceled || token.IsCancellationRequested)
+                    return;
+
+                var ex = t.Exception?.GetBaseException();
+                if (ex == null)
+                    return;
+
+                _log.Warn($"{name} faulted: {ex.Message}");
+                AddDebugLog($"{name} faulted: {ex.Message}");
+            }, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
         }
 
         public void Stop()
@@ -218,9 +231,6 @@ namespace MultiSkyLineII
                 _authoritativeLocalState = null;
                 _hasMainThreadLocalState = false;
                 _pendingLocalMoneyDelta = 0;
-                _appliedLocalElectricityCapacityDelta = 0;
-                _appliedLocalWaterCapacityDelta = 0;
-                _appliedLocalSewageCapacityDelta = 0;
                 _nextSettlementEventId = 1;
                 _lastAppliedSettlementEventId = 0;
                 while (_outboundMessages.TryDequeue(out _)) { }
@@ -315,7 +325,14 @@ namespace MultiSkyLineII
 
                 if (!token.IsCancellationRequested)
                 {
-                    await Task.Delay(5000, token).ConfigureAwait(false);
+                    try
+                    {
+                        await Task.Delay(5000, token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
                 }
             }
         }
@@ -350,7 +367,7 @@ namespace MultiSkyLineII
 
                         if (completed == pendingReadTask)
                         {
-                            var line = pendingReadTask.Result;
+                            var line = await pendingReadTask.ConfigureAwait(false);
                             pendingReadTask = null;
                             if (line == null)
                             {
@@ -461,27 +478,36 @@ namespace MultiSkyLineII
                             }
                             else if (IsHost && TryParseContractRequest(line, out var proposal))
                             {
-                                AddDebugLog($"RX CONTRACTREQ seller={proposal.SellerPlayer} buyer={proposal.BuyerPlayer} units={proposal.UnitsPerTick}");
+                                AddDebugLog($"RX CONTRACTREQ seller={proposal.SellerPlayer} buyer={(string.IsNullOrWhiteSpace(proposal.BuyerPlayer) ? "ANY" : proposal.BuyerPlayer)} units={proposal.UnitsPerTick}");
                                 lock (_sync)
                                 {
                                     if (TryGetStateByPlayer(proposal.SellerPlayer, out var sellerState) &&
-                                        TryGetStateByPlayer(proposal.BuyerPlayer, out var buyerState) &&
-                                        CanUseOutsideConnection(sellerState, proposal.Resource) &&
-                                        CanUseOutsideConnection(buyerState, proposal.Resource))
+                                        CanUseTransferInfrastructure(sellerState, proposal.Resource))
                                     {
-                                    _pendingProposals.Add(new MultiplayerContractProposal
-                                    {
-                                        Id = Guid.NewGuid().ToString("N"),
-                                        SellerPlayer = sellerState.Name,
-                                        BuyerPlayer = proposal.BuyerPlayer,
-                                        Resource = proposal.Resource,
-                                        UnitsPerTick = proposal.UnitsPerTick,
-                                        PricePerTick = proposal.PricePerTick,
-                                        CreatedUtc = DateTime.UtcNow
-                                    });
+                                        var canCreate = true;
+                                        var normalizedBuyer = string.IsNullOrWhiteSpace(proposal.BuyerPlayer) ? string.Empty : proposal.BuyerPlayer;
+                                        if (!string.IsNullOrWhiteSpace(normalizedBuyer))
+                                        {
+                                            canCreate = TryGetStateByPlayer(normalizedBuyer, out var buyerState) &&
+                                                        CanUseTransferInfrastructure(buyerState, proposal.Resource);
+                                        }
+
+                                        if (canCreate)
+                                        {
+                                            _pendingProposals.Add(new MultiplayerContractProposal
+                                            {
+                                                Id = Guid.NewGuid().ToString("N"),
+                                                SellerPlayer = sellerState.Name,
+                                                BuyerPlayer = normalizedBuyer,
+                                                Resource = proposal.Resource,
+                                                UnitsPerTick = proposal.UnitsPerTick,
+                                                PricePerTick = proposal.PricePerTick,
+                                                CreatedUtc = DateTime.UtcNow
+                                            });
+                                        }
+                                    }
                                 }
                             }
-                        }
                             else if (IsHost && TryParseContractDecision(line, out var decision))
                             {
                                 AddDebugLog($"RX CONTRACTDECISION id={decision.ProposalId} actor={decision.ActorCity} accept={decision.Accept}");
@@ -625,9 +651,6 @@ namespace MultiSkyLineII
             var targetElectricityCapacityDelta = 0;
             var targetWaterCapacityDelta = 0;
             var targetSewageCapacityDelta = 0;
-            var appliedElectricityCapacityDelta = 0;
-            var appliedWaterCapacityDelta = 0;
-            var appliedSewageCapacityDelta = 0;
             lock (_sync)
             {
                 pendingDelta = _pendingLocalMoneyDelta;
@@ -635,9 +658,6 @@ namespace MultiSkyLineII
                 targetElectricityCapacityDelta = GetLocalTargetCapacityDelta(localPlayerName, MultiplayerContractResource.Electricity);
                 targetWaterCapacityDelta = GetLocalTargetCapacityDelta(localPlayerName, MultiplayerContractResource.FreshWater);
                 targetSewageCapacityDelta = GetLocalTargetCapacityDelta(localPlayerName, MultiplayerContractResource.Sewage);
-                appliedElectricityCapacityDelta = _appliedLocalElectricityCapacityDelta;
-                appliedWaterCapacityDelta = _appliedLocalWaterCapacityDelta;
-                appliedSewageCapacityDelta = _appliedLocalSewageCapacityDelta;
             }
 
             if (pendingDelta != 0)
@@ -656,29 +676,25 @@ namespace MultiSkyLineII
                 }
             }
 
-            var electricityDeltaToApply = targetElectricityCapacityDelta - appliedElectricityCapacityDelta;
-            var waterDeltaToApply = targetWaterCapacityDelta - appliedWaterCapacityDelta;
-            var sewageDeltaToApply = targetSewageCapacityDelta - appliedSewageCapacityDelta;
-            if (electricityDeltaToApply != 0 || waterDeltaToApply != 0 || sewageDeltaToApply != 0)
+            if (targetElectricityCapacityDelta != 0 || targetWaterCapacityDelta != 0 || targetSewageCapacityDelta != 0)
             {
-                if (MultiplayerResourceReader.TryApplyUtilityCapacityDelta(electricityDeltaToApply, waterDeltaToApply, sewageDeltaToApply, out var appliedElectricity, out var appliedWater, out var appliedSewage))
+                if (MultiplayerResourceReader.TrySetUtilityCapacityTarget(
+                        targetElectricityCapacityDelta,
+                        targetWaterCapacityDelta,
+                        targetSewageCapacityDelta,
+                        out var appliedElectricity,
+                        out var appliedWater,
+                        out var appliedSewage))
                 {
-                    AddDebugLog($"Utility apply request elec={electricityDeltaToApply} water={waterDeltaToApply} sewage={sewageDeltaToApply} -> applied elec={appliedElectricity} water={appliedWater} sewage={appliedSewage}");
+                    AddDebugLog($"Utility target apply elec={targetElectricityCapacityDelta} water={targetWaterCapacityDelta} sewage={targetSewageCapacityDelta} -> delta elec={appliedElectricity} water={appliedWater} sewage={appliedSewage}");
                     if (appliedElectricity != 0 || appliedWater != 0 || appliedSewage != 0)
                     {
                         AddDebugLog($"Applied real utility delta elec={appliedElectricity} water={appliedWater} sewage={appliedSewage}");
                     }
-
-                    lock (_sync)
-                    {
-                        _appliedLocalElectricityCapacityDelta += appliedElectricity;
-                        _appliedLocalWaterCapacityDelta += appliedWater;
-                        _appliedLocalSewageCapacityDelta += appliedSewage;
-                    }
                 }
                 else
                 {
-                    AddDebugLog($"Utility apply failed for request elec={electricityDeltaToApply} water={waterDeltaToApply} sewage={sewageDeltaToApply}");
+                    AddDebugLog($"Utility apply failed for target elec={targetElectricityCapacityDelta} water={targetWaterCapacityDelta} sewage={targetSewageCapacityDelta}");
                 }
             }
 
@@ -738,19 +754,26 @@ namespace MultiSkyLineII
         public bool TryProposeContract(string sellerPlayer, string buyerPlayer, MultiplayerContractResource resource, int unitsPerTick, int pricePerTick, out string error)
         {
             error = null;
-            if (string.IsNullOrWhiteSpace(sellerPlayer) || string.IsNullOrWhiteSpace(buyerPlayer))
+            if (string.IsNullOrWhiteSpace(sellerPlayer))
             {
                 error = "Joueur invalide.";
                 return false;
             }
 
             sellerPlayer = NormalizePlayerName(sellerPlayer);
-            buyerPlayer = NormalizePlayerName(buyerPlayer);
-
-            if (string.Equals(sellerPlayer, buyerPlayer, StringComparison.OrdinalIgnoreCase))
+            var hasTargetBuyer = !string.IsNullOrWhiteSpace(buyerPlayer);
+            if (hasTargetBuyer)
             {
-                error = "Le vendeur et l'acheteur doivent etre differents.";
-                return false;
+                buyerPlayer = NormalizePlayerName(buyerPlayer);
+                if (string.Equals(sellerPlayer, buyerPlayer, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "Le vendeur et l'acheteur doivent etre differents.";
+                    return false;
+                }
+            }
+            else
+            {
+                buyerPlayer = string.Empty;
             }
 
             if (unitsPerTick <= 0 || pricePerTick <= 0)
@@ -770,22 +793,25 @@ namespace MultiSkyLineII
                         return false;
                     }
 
-                    if (!TryGetStateByPlayer(buyerPlayer, out _))
+                    if (!CanUseTransferInfrastructure(sellerState, resource))
                     {
-                        error = "Joueur acheteur introuvable.";
+                        error = "Contrat impossible: infrastructure reseau requise pour le vendeur.";
                         return false;
                     }
 
-                    if (!TryGetStateByPlayer(buyerPlayer, out var buyerState))
+                    if (hasTargetBuyer)
                     {
-                        error = "Joueur acheteur introuvable.";
-                        return false;
-                    }
+                        if (!TryGetStateByPlayer(buyerPlayer, out var buyerState))
+                        {
+                            error = "Joueur acheteur introuvable.";
+                            return false;
+                        }
 
-                    if (!CanUseOutsideConnection(sellerState, resource) || !CanUseOutsideConnection(buyerState, resource))
-                    {
-                        error = "Contrat impossible: connexion exterieure requise pour les deux joueurs.";
-                        return false;
+                        if (!CanUseTransferInfrastructure(buyerState, resource))
+                        {
+                            error = "Contrat impossible: infrastructure reseau requise pour l'acheteur.";
+                            return false;
+                        }
                     }
 
                     var maxExportable = GetSellerAvailable(resource, sellerState);
@@ -812,7 +838,7 @@ namespace MultiSkyLineII
                         CreatedUtc = now
                     };
                     _pendingProposals.Add(proposal);
-                    AddDebugLog($"Local proposal queued seller={proposal.SellerPlayer} buyer={proposal.BuyerPlayer} units={proposal.UnitsPerTick}");
+                    AddDebugLog($"Local proposal queued seller={proposal.SellerPlayer} buyer={(string.IsNullOrWhiteSpace(proposal.BuyerPlayer) ? "ANY" : proposal.BuyerPlayer)} units={proposal.UnitsPerTick}");
                 }
 
                 return true;
@@ -824,16 +850,25 @@ namespace MultiSkyLineII
                 return false;
             }
 
-            if (!TryGetStateByPlayer(buyerPlayer, out var clientBuyerState))
+            if (!CanUseTransferInfrastructure(clientSellerState, resource))
             {
-                error = "Joueur acheteur introuvable.";
+                error = "Contrat impossible: infrastructure reseau requise pour le vendeur.";
                 return false;
             }
 
-            if (!CanUseOutsideConnection(clientSellerState, resource) || !CanUseOutsideConnection(clientBuyerState, resource))
+            if (hasTargetBuyer)
             {
-                error = "Contrat impossible: connexion exterieure requise pour les deux joueurs.";
-                return false;
+                if (!TryGetStateByPlayer(buyerPlayer, out var clientBuyerState))
+                {
+                    error = "Joueur acheteur introuvable.";
+                    return false;
+                }
+
+                if (!CanUseTransferInfrastructure(clientBuyerState, resource))
+                {
+                    error = "Contrat impossible: infrastructure reseau requise pour l'acheteur.";
+                    return false;
+                }
             }
 
             var clientMaxExportable = GetSellerAvailable(resource, clientSellerState);
@@ -851,7 +886,7 @@ namespace MultiSkyLineII
 
             var request = SerializeContractRequest(sellerPlayer, buyerPlayer, resource, unitsPerTick, pricePerTick);
             _outboundMessages.Enqueue(request);
-            AddDebugLog($"Queued CONTRACTREQ seller={sellerPlayer} buyer={buyerPlayer} units={unitsPerTick}");
+            AddDebugLog($"Queued CONTRACTREQ seller={sellerPlayer} buyer={(string.IsNullOrWhiteSpace(buyerPlayer) ? "ANY" : buyerPlayer)} units={unitsPerTick}");
             return true;
         }
 
@@ -1368,7 +1403,7 @@ namespace MultiSkyLineII
             proposal = new ContractProposal
             {
                 SellerPlayer = NormalizePlayerName(Uri.UnescapeDataString(parts[1])),
-                BuyerPlayer = NormalizePlayerName(Uri.UnescapeDataString(parts[2])),
+                BuyerPlayer = string.IsNullOrWhiteSpace(parts[2]) ? string.Empty : NormalizePlayerName(Uri.UnescapeDataString(parts[2])),
                 Resource = Enum.IsDefined(typeof(MultiplayerContractResource), resourceId)
                     ? (MultiplayerContractResource)resourceId
                     : MultiplayerContractResource.Electricity,
@@ -1400,37 +1435,55 @@ namespace MultiSkyLineII
             }
 
             var proposal = _pendingProposals[index];
-            if (!string.Equals(proposal.SellerPlayer, actorCity, StringComparison.OrdinalIgnoreCase))
+            var isPublicOffer = string.IsNullOrWhiteSpace(proposal.BuyerPlayer);
+            if (isPublicOffer)
             {
-                error = "Seul le joueur vendeur peut repondre.";
+                if (string.Equals(proposal.SellerPlayer, actorCity, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "Le vendeur ne peut pas accepter sa propre offre.";
+                    return false;
+                }
+            }
+            else if (!string.Equals(proposal.BuyerPlayer, actorCity, StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Seul le joueur acheteur peut repondre.";
                 return false;
             }
 
-            _pendingProposals.RemoveAt(index);
             if (!accept)
             {
+                if (isPublicOffer)
+                {
+                    AddDebugLog($"Public proposal {proposalId} ignored by {actorCity}");
+                    return true;
+                }
+
+                _pendingProposals.RemoveAt(index);
                 AddDebugLog($"Proposal {proposalId} refused by {actorCity}");
                 return true;
             }
 
-            if (!TryGetStateByPlayer(proposal.SellerPlayer, out _) || !TryGetStateByPlayer(proposal.BuyerPlayer, out _))
+            var resolvedBuyer = isPublicOffer ? NormalizePlayerName(actorCity) : proposal.BuyerPlayer;
+            if (!TryGetStateByPlayer(proposal.SellerPlayer, out _) || !TryGetStateByPlayer(resolvedBuyer, out _))
             {
                 error = "Joueurs introuvables au moment de l'acceptation.";
                 return false;
             }
 
+            _pendingProposals.RemoveAt(index);
+
             _contracts.Add(new MultiplayerContract
             {
                 Id = Guid.NewGuid().ToString("N"),
                 SellerPlayer = proposal.SellerPlayer,
-                BuyerPlayer = proposal.BuyerPlayer,
+                BuyerPlayer = resolvedBuyer,
                 Resource = proposal.Resource,
                 UnitsPerTick = proposal.UnitsPerTick,
                 EffectiveUnitsPerTick = 0,
                 PricePerTick = proposal.PricePerTick,
                 CreatedUtc = DateTime.UtcNow
             });
-            AddDebugLog($"Proposal {proposalId} accepted by {actorCity}, contract active.");
+            AddDebugLog($"Proposal {proposalId} accepted by {resolvedBuyer}, contract active.");
 
             return true;
         }
@@ -1521,9 +1574,9 @@ namespace MultiSkyLineII
                     !effectiveStates.TryGetValue(contract.BuyerPlayer, out var buyer))
                     continue;
 
-                if (!CanUseOutsideConnection(seller, contract.Resource) || !CanUseOutsideConnection(buyer, contract.Resource))
+                if (!CanUseTransferInfrastructure(seller, contract.Resource) || !CanUseTransferInfrastructure(buyer, contract.Resource))
                 {
-                    if (!TryHandleContractFailure(contract.Id, "outside connection unavailable", i, out var removedIndex))
+                    if (!TryHandleContractFailure(contract.Id, "transfer infrastructure unavailable", i, out var removedIndex))
                         continue;
                     if (removedIndex)
                         i--;
@@ -1595,12 +1648,14 @@ namespace MultiSkyLineII
             }
         }
 
-        private static bool CanUseOutsideConnection(MultiplayerResourceState state, MultiplayerContractResource resource)
+        private static bool CanUseTransferInfrastructure(MultiplayerResourceState state, MultiplayerContractResource resource)
         {
             switch (resource)
             {
                 case MultiplayerContractResource.Electricity:
-                    return state.HasElectricityOutsideConnection;
+                    // Electricity contracts are applied on the local network (producer/consumer balancing),
+                    // so outside border connectivity is not required here.
+                    return true;
                 case MultiplayerContractResource.FreshWater:
                     return state.HasWaterOutsideConnection;
                 case MultiplayerContractResource.Sewage:

@@ -70,6 +70,11 @@
             <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
             <Link>PublishConfiguration.xml</Link>
         </Content>
+        <Content Include="Localization\**\*.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+            <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+            <Link>Localization\%(RecursiveDir)%(Filename)%(Extension)</Link>
+        </Content>
     </ItemGroup>
 
     <ItemGroup>
@@ -126,6 +131,15 @@
     <Target Name="BuildUiModule" AfterTargets="AfterBuild" Condition="'$(NeedBuild)' and Exists('UI\\package.json')">
         <Message Text="Build UI module (UI\\package.json)." Importance="high"/>
         <Exec Command="npm run build --prefix UI" LogStandardErrorAsError="true"/>
+    </Target>
+
+    <Target Name="SetupPublishMarkdown" BeforeTargets="BeforeBuild">
+        <XmlPoke XmlInputPath="$(PublishConfigurationPath)"
+                 Value="$([System.IO.File]::ReadAllText($(ProjectDir)Properties/LongDescription.md))"
+                 Query="//LongDescription" />
+        <XmlPoke XmlInputPath="$(PublishConfigurationPath)"
+                 Value="$([System.IO.File]::ReadAllText($(ProjectDir)Properties/ChangeLog.md))"
+                 Query="//ChangeLog" />
     </Target>
 
     <Target Name="ReadPublishModId" BeforeTargets="RunModPublisher">

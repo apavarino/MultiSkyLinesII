@@ -95,7 +95,7 @@ namespace MultiSkyLineII
                 AddBinding(new TriggerBinding<bool>(Group, "setVisible", SetVisible));
                 AddBinding(new TriggerBinding(Group, "toggleVisible", ToggleVisible));
                 AddBinding(new TriggerBinding<string>(Group, "propose", ProposeContractPacked));
-                AddBinding(new TriggerBinding<string, bool>(Group, "respond", RespondProposal));
+                AddBinding(new TriggerBinding<string>(Group, "respond", RespondProposalPacked));
                 AddBinding(new TriggerBinding<string>(Group, "cancel", CancelContract));
                 AddBinding(new TriggerBinding(Group, "clearLogs", ClearLogs));
                 AddBinding(new TriggerBinding(Group, "uiReady", UiReady));
@@ -176,6 +176,21 @@ namespace MultiSkyLineII
             PublishSnapshot(force: true);
         }
 
+        private void RespondProposalPacked(string packed)
+        {
+            if (string.IsNullOrWhiteSpace(packed))
+                return;
+
+            var parts = packed.Split('|');
+            if (parts.Length < 2)
+                return;
+
+            var id = parts[0];
+            var accept = string.Equals(parts[1], "1", StringComparison.Ordinal) ||
+                         string.Equals(parts[1], "true", StringComparison.OrdinalIgnoreCase);
+            RespondProposal(id, accept);
+        }
+
         private void RespondProposal(string id, bool accept)
         {
             if (_networkService == null)
@@ -243,6 +258,7 @@ namespace MultiSkyLineII
             var logs = _networkService.GetDebugLogLines();
             var local = _networkService.GetLocalState();
             var message = DateTime.UtcNow < _uiMessageUntilUtc ? _uiMessage : string.Empty;
+            var locale = LocalizationCatalog.NormalizeLocale(Mod.CurrentLocale);
 
             sb.Append('{');
             AppendProp(sb, "version", Mod.DisplayVersion); sb.Append(',');
@@ -250,6 +266,10 @@ namespace MultiSkyLineII
             AppendProp(sb, "destination", _networkService.DestinationEndpoint); sb.Append(',');
             AppendProp(sb, "localName", local.Name); sb.Append(',');
             AppendProp(sb, "message", message); sb.Append(',');
+            AppendProp(sb, "uiLocale", locale); sb.Append(',');
+            sb.Append("\"contractsEnabled\":true,");
+            AppendProp(sb, "contractsEnabledDebug", "true"); sb.Append(',');
+            AppendUiStrings(sb, locale); sb.Append(',');
             sb.Append("\"visible\":").Append(_visible ? "true" : "false").Append(',');
             sb.Append("\"states\":[");
             for (var i = 0; i < states.Count; i++)
@@ -300,6 +320,44 @@ namespace MultiSkyLineII
             sb.Append(']');
             sb.Append('}');
             return sb.ToString();
+        }
+
+        private static void AppendUiStrings(StringBuilder sb, string locale)
+        {
+            sb.Append("\"ui\":{");
+            AppendProp(sb, "title", L(locale, "ui.title", "MultiSkyLines II")); sb.Append(',');
+            AppendProp(sb, "close", L(locale, "ui.close", "Close")); sb.Append(',');
+            AppendProp(sb, "tab_overview", L(locale, "ui.tab_overview", "Overview")); sb.Append(',');
+            AppendProp(sb, "tab_contracts", L(locale, "ui.tab_contracts", "Contracts")); sb.Append(',');
+            AppendProp(sb, "tab_debug", L(locale, "ui.tab_debug", "Debug")); sb.Append(',');
+            AppendProp(sb, "session", L(locale, "ui.session", "Session")); sb.Append(',');
+            AppendProp(sb, "local", L(locale, "ui.local", "Local")); sb.Append(',');
+            AppendProp(sb, "active_contracts", L(locale, "ui.active_contracts", "Active contracts")); sb.Append(',');
+            AppendProp(sb, "pending_proposals", L(locale, "ui.pending_proposals", "Pending proposals")); sb.Append(',');
+            AppendProp(sb, "none_active_contracts", L(locale, "ui.none_active_contracts", "No active contracts.")); sb.Append(',');
+            AppendProp(sb, "none_pending_proposals", L(locale, "ui.none_pending_proposals", "No pending proposals.")); sb.Append(',');
+            AppendProp(sb, "cancel", L(locale, "ui.cancel", "Cancel")); sb.Append(',');
+            AppendProp(sb, "accept", L(locale, "ui.accept", "Accept")); sb.Append(',');
+            AppendProp(sb, "reject", L(locale, "ui.reject", "Reject")); sb.Append(',');
+            AppendProp(sb, "public_offer_title", L(locale, "ui.public_offer_title", "Propose a public service offer")); sb.Append(',');
+            AppendProp(sb, "public_offer_desc", L(locale, "ui.public_offer_desc", "Any interested player can accept.")); sb.Append(',');
+            AppendProp(sb, "change_resource", L(locale, "ui.change_resource", "Change resource")); sb.Append(',');
+            AppendProp(sb, "send_offer", L(locale, "ui.send_offer", "Send offer")); sb.Append(',');
+            AppendProp(sb, "clear_logs", L(locale, "ui.clear_logs", "Clear logs")); sb.Append(',');
+            AppendProp(sb, "ping_bridge", L(locale, "ui.ping_bridge", "Ping bridge")); sb.Append(',');
+            AppendProp(sb, "no_network_logs", L(locale, "ui.no_network_logs", "No network logs.")); sb.Append(',');
+            AppendProp(sb, "resource_electricity", L(locale, "ui.resource_electricity", "Electricity")); sb.Append(',');
+            AppendProp(sb, "resource_water", L(locale, "ui.resource_water", "Water")); sb.Append(',');
+            AppendProp(sb, "resource_sewage", L(locale, "ui.resource_sewage", "Sewage")); sb.Append(',');
+            AppendProp(sb, "resource_unknown", L(locale, "ui.resource_unknown", "Unknown")); sb.Append(',');
+            AppendProp(sb, "launcher_open", L(locale, "ui.launcher_open", "MS2 OPEN")); sb.Append(',');
+            AppendProp(sb, "launcher_closed", L(locale, "ui.launcher_closed", "MS2"));
+            sb.Append('}');
+        }
+
+        private static string L(string locale, string key, string fallback)
+        {
+            return LocalizationCatalog.GetText(locale, key, fallback);
         }
 
         private static void AppendState(StringBuilder sb, MultiplayerResourceState s)

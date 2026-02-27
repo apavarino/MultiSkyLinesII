@@ -11,11 +11,15 @@ namespace MultiSkyLineII
     {
         private static readonly string DirectoryPath = Path.Combine(Application.persistentDataPath, "MultiSkyLineII");
         private static readonly string FilePath = Path.Combine(DirectoryPath, "settings.cfg");
+        public static string SelectedLocale { get; private set; } = "en-US";
 
         public static void Load(MultiplayerSettings settings, ILog log)
         {
             if (settings == null || !File.Exists(FilePath))
+            {
+                SelectedLocale = settings?.CurrentLocale ?? "en-US";
                 return;
+            }
 
             try
             {
@@ -68,6 +72,13 @@ namespace MultiSkyLineII
                 {
                     settings.PlayerName = playerName;
                 }
+
+                if (entries.TryGetValue(nameof(MultiplayerSettings.CurrentLocale), out var currentLocale))
+                {
+                    settings.CurrentLocale = currentLocale;
+                }
+
+                SelectedLocale = settings.CurrentLocale ?? "en-US";
             }
             catch (Exception e)
             {
@@ -91,10 +102,12 @@ namespace MultiSkyLineII
                     $"{nameof(MultiplayerSettings.BindAddress)}={Uri.EscapeDataString(settings.BindAddress ?? string.Empty)}",
                     $"{nameof(MultiplayerSettings.ServerAddress)}={Uri.EscapeDataString(settings.ServerAddress ?? string.Empty)}",
                     $"{nameof(MultiplayerSettings.Port)}={Uri.EscapeDataString(settings.Port.ToString(CultureInfo.InvariantCulture))}",
-                    $"{nameof(MultiplayerSettings.PlayerName)}={Uri.EscapeDataString(settings.PlayerName ?? string.Empty)}"
+                    $"{nameof(MultiplayerSettings.PlayerName)}={Uri.EscapeDataString(settings.PlayerName ?? string.Empty)}",
+                    $"{nameof(MultiplayerSettings.CurrentLocale)}={Uri.EscapeDataString(settings.CurrentLocale ?? "en-US")}"
                 };
 
                 File.WriteAllLines(FilePath, lines);
+                SelectedLocale = settings.CurrentLocale ?? "en-US";
             }
             catch (Exception e)
             {

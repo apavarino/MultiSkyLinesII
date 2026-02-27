@@ -16,6 +16,12 @@ namespace MultiSkyLineII
         public static ILog log = LogManager.GetLogger($"{nameof(MultiSkyLineII)}.{nameof(Mod)}")
             .SetShowsErrorsInUI(false);
         public static string DisplayVersion { get; private set; } = "1.0.0";
+        public static string CurrentLocale { get; private set; } = "en-US";
+
+        public static void SetCurrentLocale(string locale)
+        {
+            CurrentLocale = LocalizationCatalog.NormalizeLocale(locale);
+        }
         private MultiplayerSettings _settings;
         private MultiplayerNetworkService _network;
         private MultiplayerLocaleSource _localeSource;
@@ -30,14 +36,13 @@ namespace MultiSkyLineII
             ModDiagnostics.ResetForNewSession();
             ModDiagnostics.Write("OnLoad start.");
             ModDiagnostics.Write($"Diagnostics file: {ModDiagnostics.LogFilePath}");
+            updateSystem.UpdateAt<ExchangeHubPrefabBootstrapSystem>(SystemUpdatePhase.PrefabUpdate);
+            ModDiagnostics.Write("Registered ExchangeHubPrefabBootstrapSystem at PrefabUpdate.");
             updateSystem.UpdateAt<NativeUiBootstrapSystem>(SystemUpdatePhase.UIUpdate);
             ModDiagnostics.Write("Registered NativeUiBootstrapSystem at UIUpdate.");
             log.Info(nameof(OnLoad));
 
             _settings = new MultiplayerSettings(this);
-            _localeSource = new MultiplayerLocaleSource(_settings);
-            RegisterLocalizationSource();
-            _settings.RegisterInOptionsUI();
             MultiplayerSettingsStorage.Load(_settings, log);
             if (_settings.Port < 1 || _settings.Port > 65535)
             {
@@ -47,6 +52,15 @@ namespace MultiSkyLineII
             {
                 _settings.PlayerName = MultiplayerSettings.CreateRandomPlayerName();
             }
+            if (!string.Equals(_settings.CurrentLocale, "en-US", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(_settings.CurrentLocale, "fr-FR", StringComparison.OrdinalIgnoreCase))
+            {
+                _settings.CurrentLocale = "en-US";
+            }
+            RefreshLocalizationSource();
+            _settings.RegisterInOptionsUI();
+            SetCurrentLocale(_settings.CurrentLocale);
+            ModDiagnostics.Write($"Settings loaded: locale={CurrentLocale}");
             MultiplayerSettingsStorage.Save(_settings, log);
             _settings.onSettingsApplied += OnSettingsApplied;
 
@@ -124,7 +138,15 @@ namespace MultiSkyLineII
                 {
                     _settings.PlayerName = MultiplayerSettings.CreateRandomPlayerName();
                 }
+                if (!string.Equals(_settings.CurrentLocale, "en-US", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(_settings.CurrentLocale, "fr-FR", StringComparison.OrdinalIgnoreCase))
+                {
+                    _settings.CurrentLocale = "en-US";
+                }
 
+                SetCurrentLocale(_settings.CurrentLocale);
+                ModDiagnostics.Write($"Settings applied: locale={CurrentLocale}");
+                RefreshLocalizationSource();
                 MultiplayerSettingsStorage.Save(_settings, log);
                 _network?.Restart(_settings);
             }
@@ -259,6 +281,7 @@ namespace MultiSkyLineII
                 {
                     addSource.Invoke(localizationManager, new object[] { locale, _localeSource });
                 }
+                ModDiagnostics.Write($"Localization source registered. Selected locale={_settings?.CurrentLocale ?? "en-US"}");
             }
             catch (Exception e)
             {
@@ -291,6 +314,14 @@ namespace MultiSkyLineII
             {
                 _registeredLocales = null;
             }
+        }
+
+        private void RefreshLocalizationSource()
+        {
+            UnregisterLocalizationSource();
+            LocalizationCatalog.Invalidate();
+            _localeSource = new MultiplayerLocaleSource(_settings);
+            RegisterLocalizationSource();
         }
 
         private void CreateHudOverlay()
