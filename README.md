@@ -43,12 +43,12 @@ Bring your cities together with a real-time multiplayer resource trading experie
 
 ### Compile the full solution
 ```powershell
-dotnet build MultiSkyLineII.sln -nologo
+dotnet build MultiSkyLinesII.sln -nologo
 ```
 
 ### Compile only the main mod project
 ```powershell
-dotnet build MultiSkyLineII.csproj -nologo
+dotnet build MultiSkyLinesII.csproj -nologo
 ```
 
 ## Tests

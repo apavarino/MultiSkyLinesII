@@ -1,0 +1,12 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Publish New Version (Auto Bump)" type="js.build_tools.npm">
+    <package-json value="$PROJECT_DIR$/Tools/Run/package.json" />
+    <command value="run" />
+    <scripts>
+      <script value="publish:new-version:auto" />
+    </scripts>
+    <node-interpreter value="project" />
+    <envs />
+    <method v="2" />
+  </configuration>
+</component>

@@ -58,7 +58,7 @@ Bring your cities together with a real-time multiplayer resource trading experie
 - Kept native CS2 UI and custom exchange hub flow active by default.
 - Stability and diagnostics improvements on UI/network bridge.</ChangeLog>
   <!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
-  <ExternalLink Type="" Url="" />
+  <ExternalLink Type="github" Url="https://github.com/apavarino/MultiSkyLinesII" />
   <!--Supported values Public, Private, Unlisted-->
   <AccessLevel Value="Public" />
 </Publish>

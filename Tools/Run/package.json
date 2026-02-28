@@ -1,0 +1,13 @@
+{
+  "name": "multiskylineii-runner",
+  "private": true,
+  "scripts": {
+    "build": "dotnet build ../../MultiSkyLinesII.sln -nologo",
+    "test:unit": "dotnet test ../../tests/MultiSkyLineII.Tests/MultiSkyLineII.Tests.csproj -nologo",
+    "version:bump": "powershell -NoProfile -ExecutionPolicy Bypass -File ./bump-version.ps1",
+    "publish:new-mod": "dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=PublishNewMod",
+    "publish:new-version": "dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=PublishNewVersion",
+    "publish:update-config": "dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=UpdatePublishedConfiguration",
+    "publish:new-version:auto": "npm run version:bump && dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=PublishNewVersion"
+  }
+}
