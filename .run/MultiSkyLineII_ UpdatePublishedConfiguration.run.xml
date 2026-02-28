@@ -1,9 +1,0 @@
-﻿<component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="MultiSkyLineII: UpdatePublishedConfiguration" type="DotNetMsBuildPublish" factoryName="Publish to IIS">
-    <option name="projectPath" value="$PROJECT_DIR$/MultiSkyLineII.csproj" />
-    <riderPublish configuration="Release" platform="Any CPU" pubxml_path="$PROJECT_DIR$/Properties/PublishProfiles/UpdatePublishedConfiguration.pubxml" />
-    <method v="2">
-      <option name="Build" default="false" projectName="MultiSkyLineII" projectPath="$PROJECT_DIR$/MultiSkyLineII.csproj" />
-    </method>
-  </configuration>
-</component>

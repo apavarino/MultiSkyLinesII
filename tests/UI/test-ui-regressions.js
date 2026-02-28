@@ -12,7 +12,7 @@ function assert(condition, message) {
   }
 }
 
-const sourcePath = path.resolve(__dirname, "../src/index.js");
+const sourcePath = path.resolve(__dirname, "../../UI/src/index.js");
 const source = fs.readFileSync(sourcePath, "utf8");
 
 // Regression guard: this exact signature previously caused runtime crash

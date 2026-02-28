@@ -4,6 +4,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiSkyLinesII", "MultiSkyLinesII.csproj", "{F8D73ABD-1870-4D83-8B97-BA52641035F4}"
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{C01EA671-F6C4-4716-978A-C2DE4993C0C3}"
+	ProjectSection(SolutionItems) = preProject
+		tests\UI\test-ui-regressions.js = tests\UI\test-ui-regressions.js
+	EndProjectSection
 EndProject
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tools", "Tools", "{8C9B11C0-EB52-4FB8-A5C1-301FD9DC1D57}"
 	ProjectSection(SolutionItems) = preProject

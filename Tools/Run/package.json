@@ -4,6 +4,8 @@
   "scripts": {
     "build": "dotnet build ../../MultiSkyLinesII.sln -nologo",
     "test:unit": "dotnet test ../../tests/MultiSkyLineII.Tests/MultiSkyLineII.Tests.csproj -nologo",
+    "test:ui": "npm --prefix ../../UI test",
+    "test:all": "npm run test:unit && npm run test:ui",
     "version:bump": "powershell -NoProfile -ExecutionPolicy Bypass -File ./bump-version.ps1",
     "publish:new-mod": "dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=PublishNewMod",
     "publish:new-version": "dotnet publish ../../MultiSkyLinesII.csproj -c Release -p:PublishProfile=PublishNewVersion",

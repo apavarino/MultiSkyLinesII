@@ -9,7 +9,7 @@
   "scripts": {
     "build": "webpack --mode production && node scripts/copy-mod-json.js",
     "dev": "webpack --mode development --watch && node scripts/copy-mod-json.js",
-    "test": "node scripts/test-ui-regressions.js"
+    "test": "node ../tests/UI/test-ui-regressions.js"
   },
   "exclude": [
     "node_modules",

@@ -13,7 +13,6 @@ namespace MultiSkyLineII
     {
         private static readonly BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private static readonly object UtilitySync = new object();
-        private static readonly System.Collections.Generic.HashSet<long> LoggedHubSelections = new System.Collections.Generic.HashSet<long>();
         private static DateTime LastNoDeltaWarnUtc = DateTime.MinValue;
         private static DateTime LastElectricityDiagUtc = DateTime.MinValue;
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecByEntity = new System.Collections.Generic.Dictionary<long, int>();
@@ -266,22 +265,6 @@ namespace MultiSkyLineII
             }
         }
 
-        private static int SetElectricityProducerTarget(EntityManager entityManager, int target)
-        {
-            var query = entityManager.CreateEntityQuery(ComponentType.ReadWrite<ElectricityProducer>());
-            return ReconcileProducerCapacityTarget(
-                query.ToEntityArray(Unity.Collections.Allocator.Temp),
-                target,
-                AppliedElecByEntity,
-                entity => entityManager.GetComponentData<ElectricityProducer>(entity).m_Capacity,
-                (entity, value) =>
-                {
-                    var c = entityManager.GetComponentData<ElectricityProducer>(entity);
-                    c.m_Capacity = value;
-                    entityManager.SetComponentData(entity, c);
-                });
-        }
-
         private static int SetWaterPumpTarget(EntityManager entityManager, int target)
         {
             var query = entityManager.CreateEntityQuery(ComponentType.ReadWrite<WaterPumpingStation>());
@@ -311,22 +294,6 @@ namespace MultiSkyLineII
                     var c = entityManager.GetComponentData<SewageOutlet>(entity);
                     c.m_Capacity = value;
                     entityManager.SetComponentData(entity, c);
-                });
-        }
-
-        private static int SetElectricityOutsideEdgeTarget(EntityManager entityManager, int target)
-        {
-            var edges = CollectElectricityOutsideEdges(entityManager);
-            return ReconcileEdgeCapacityTarget(
-                edges,
-                target,
-                AppliedElecEdgeByEntity,
-                entity => entityManager.GetComponentData<ElectricityFlowEdge>(entity).m_Capacity,
-                (entity, value) =>
-                {
-                    var edge = entityManager.GetComponentData<ElectricityFlowEdge>(entity);
-                    edge.m_Capacity = value;
-                    entityManager.SetComponentData(entity, edge);
                 });
         }
 
@@ -697,133 +664,6 @@ namespace MultiSkyLineII
             return totalAppliedChange;
         }
 
-        private static int ReconcileElectricityConsumerTarget(
-            Unity.Collections.NativeArray<Entity> entities,
-            int target,
-            System.Collections.Generic.Dictionary<long, int> appliedByEntity,
-            Func<Entity, ElectricityConsumer> getConsumer,
-            Action<Entity, ElectricityConsumer> setConsumer)
-        {
-            try
-            {
-                if (entities.Length == 0)
-                {
-                    appliedByEntity.Clear();
-                    return 0;
-                }
-
-                var count = entities.Length;
-                var keys = new long[count];
-                var current = new int[count];
-                var baseWanted = new int[count];
-                var desiredApplied = new int[count];
-                var presentKeys = new System.Collections.Generic.HashSet<long>();
-
-                for (var i = 0; i < count; i++)
-                {
-                    var entity = entities[i];
-                    var key = GetEntityKey(entity);
-                    keys[i] = key;
-                    presentKeys.Add(key);
-                    var consumer = getConsumer(entity);
-                    current[i] = Math.Max(0, consumer.m_WantedConsumption);
-                    var prevApplied = appliedByEntity.TryGetValue(key, out var prev) ? prev : 0;
-                    baseWanted[i] = Math.Max(0, current[i] - prevApplied);
-                    desiredApplied[i] = 0;
-                }
-
-                if (target > 0)
-                {
-                    desiredApplied[0] = target;
-                }
-                else if (target < 0)
-                {
-                    var remaining = -target;
-                    for (var i = 0; i < count && remaining > 0; i++)
-                    {
-                        var removable = Math.Min(baseWanted[i], remaining);
-                        if (removable <= 0)
-                            continue;
-
-                        desiredApplied[i] = -removable;
-                        remaining -= removable;
-                    }
-                }
-
-                var totalAppliedChange = 0;
-                for (var i = 0; i < count; i++)
-                {
-                    var nextWanted = Math.Max(0, baseWanted[i] + desiredApplied[i]);
-                    if (nextWanted != current[i])
-                    {
-                        var consumer = getConsumer(entities[i]);
-                        consumer.m_WantedConsumption = nextWanted;
-                        if (consumer.m_FulfilledConsumption > nextWanted)
-                            consumer.m_FulfilledConsumption = nextWanted;
-                        setConsumer(entities[i], consumer);
-                    }
-
-                    totalAppliedChange += nextWanted - current[i];
-                    if (desiredApplied[i] == 0)
-                        appliedByEntity.Remove(keys[i]);
-                    else
-                        appliedByEntity[keys[i]] = desiredApplied[i];
-                }
-
-                var staleKeys = new System.Collections.Generic.List<long>();
-                foreach (var key in appliedByEntity.Keys)
-                {
-                    if (!presentKeys.Contains(key))
-                        staleKeys.Add(key);
-                }
-
-                for (var i = 0; i < staleKeys.Count; i++)
-                {
-                    appliedByEntity.Remove(staleKeys[i]);
-                }
-
-                return totalAppliedChange;
-            }
-            finally
-            {
-                entities.Dispose();
-            }
-        }
-
-        private static System.Collections.Generic.List<Entity> CollectElectricityOutsideEdges(EntityManager entityManager)
-        {
-            var result = new System.Collections.Generic.List<Entity>();
-            var tradeNodes = entityManager.CreateEntityQuery(
-                ComponentType.ReadOnly<TradeNode>(),
-                ComponentType.ReadOnly<ElectricityFlowNode>(),
-                ComponentType.ReadOnly<ConnectedFlowEdge>());
-
-            if (tradeNodes.IsEmptyIgnoreFilter)
-                return result;
-
-            var nodes = tradeNodes.ToEntityArray(Unity.Collections.Allocator.Temp);
-            try
-            {
-                for (var i = 0; i < nodes.Length; i++)
-                {
-                    var connected = entityManager.GetBuffer<ConnectedFlowEdge>(nodes[i]);
-                    for (var j = 0; j < connected.Length; j++)
-                    {
-                        var edgeEntity = connected[j].m_Edge;
-                        if (!entityManager.HasComponent<ElectricityFlowEdge>(edgeEntity))
-                            continue;
-                        result.Add(edgeEntity);
-                    }
-                }
-            }
-            finally
-            {
-                nodes.Dispose();
-            }
-
-            return result;
-        }
-
         private static System.Collections.Generic.List<Entity> CollectElectricityHubEntities(EntityManager entityManager)
         {
             var result = new System.Collections.Generic.List<Entity>();
@@ -1004,8 +844,6 @@ namespace MultiSkyLineII
             return result;
         }
 
-        private static void LogHubSelectionOnce(Entity hub, Entity selected, string fieldName, int score) { }
-
         private static void EnsureElectricityHubComponents(EntityManager entityManager, System.Collections.Generic.List<Entity> hubs, bool ensureProducer, bool ensureConsumer)
         {
             for (var i = 0; i < hubs.Count; i++)
@@ -1031,16 +869,6 @@ namespace MultiSkyLineII
                     });
                 }
             }
-        }
-
-        private static Unity.Collections.NativeArray<Entity> ToNativeArray(System.Collections.Generic.List<Entity> entities)
-        {
-            var array = new Unity.Collections.NativeArray<Entity>(entities.Count, Unity.Collections.Allocator.Temp);
-            for (var i = 0; i < entities.Count; i++)
-            {
-                array[i] = entities[i];
-            }
-            return array;
         }
 
         private static System.Collections.Generic.List<Entity> CollectWaterOutsideEdges(EntityManager entityManager)
