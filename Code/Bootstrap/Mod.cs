@@ -1,4 +1,3 @@
-using Colossal.Logging;
 using Game;
 using Game.Modding;
 using Game.SceneFlow;
@@ -13,8 +12,6 @@ namespace MultiSkyLineII
 {
     public class Mod : IMod
     {
-        public static ILog log = LogManager.GetLogger($"{nameof(MultiSkyLineII)}.{nameof(Mod)}")
-            .SetShowsErrorsInUI(false);
         public static string DisplayVersion { get; private set; } = "1.0.0";
         public static string CurrentLocale { get; private set; } = "en-US";
 
@@ -26,7 +23,6 @@ namespace MultiSkyLineII
         private MultiplayerNetworkService _network;
         private MultiplayerLocaleSource _localeSource;
         private string[] _registeredLocales;
-        private MultiplayerHudOverlay _hudOverlay;
         private MultiplayerNativeUiBridge _nativeUiBridge;
         private string _cachedPlayerName = "Unknown Player";
         private bool _isApplyingSettings;
@@ -38,12 +34,14 @@ namespace MultiSkyLineII
             ModDiagnostics.Write($"Diagnostics file: {ModDiagnostics.LogFilePath}");
             updateSystem.UpdateAt<ExchangeHubPrefabBootstrapSystem>(SystemUpdatePhase.PrefabUpdate);
             ModDiagnostics.Write("Registered ExchangeHubPrefabBootstrapSystem at PrefabUpdate.");
+            updateSystem.UpdateAt<BuildingPlacementDiagnosticsSystem>(SystemUpdatePhase.GameSimulation);
+            ModDiagnostics.Write("Registered BuildingPlacementDiagnosticsSystem at GameSimulation.");
             updateSystem.UpdateAt<NativeUiBootstrapSystem>(SystemUpdatePhase.UIUpdate);
             ModDiagnostics.Write("Registered NativeUiBootstrapSystem at UIUpdate.");
-            log.Info(nameof(OnLoad));
+            ModDiagnostics.Info(nameof(OnLoad));
 
             _settings = new MultiplayerSettings(this);
-            MultiplayerSettingsStorage.Load(_settings, log);
+            MultiplayerSettingsStorage.Load(_settings);
             if (_settings.Port < 1 || _settings.Port > 65535)
             {
                 _settings.Port = 25565;
@@ -61,17 +59,17 @@ namespace MultiSkyLineII
             _settings.RegisterInOptionsUI();
             SetCurrentLocale(_settings.CurrentLocale);
             ModDiagnostics.Write($"Settings loaded: locale={CurrentLocale}");
-            MultiplayerSettingsStorage.Save(_settings, log);
+            MultiplayerSettingsStorage.Save(_settings);
             _settings.onSettingsApplied += OnSettingsApplied;
 
-            _network = new MultiplayerNetworkService(log, GetLocalState);
+            _network = new MultiplayerNetworkService(GetLocalState);
             _network.Start(_settings);
             ModDiagnostics.Write("Network service started.");
             if (GameManager.instance.modManager.TryGetExecutableAsset(this, out var asset))
             {
                 DisplayVersion = ResolveDisplayVersion(asset.path);
-                log.Info($"Current mod asset at {asset.path}");
-                log.Info($"Resolved mod version for HUD: {DisplayVersion}");
+                ModDiagnostics.Info($"Current mod asset at {asset.path}");
+                ModDiagnostics.Info($"Resolved mod version for HUD: {DisplayVersion}");
                 ModDiagnostics.Write($"Asset path: {asset.path}");
                 ModDiagnostics.Write($"DisplayVersion: {DisplayVersion}");
             }
@@ -110,13 +108,12 @@ namespace MultiSkyLineII
 
             _network?.Dispose();
             _network = null;
-            DestroyHudOverlay();
             DestroyNativeUiBridge();
             UnregisterLocalizationSource();
             _localeSource = null;
             _settings = null;
 
-            log.Info(nameof(OnDispose));
+            ModDiagnostics.Info(nameof(OnDispose));
             ModDiagnostics.Write("OnDispose complete.");
         }
 
@@ -126,7 +123,7 @@ namespace MultiSkyLineII
                 return;
 
             _isApplyingSettings = true;
-            log.Info("Settings applied, restarting multiplayer service.");
+            ModDiagnostics.Info("Settings applied, restarting multiplayer service.");
             try
             {
                 if (_settings.Port < 1 || _settings.Port > 65535)
@@ -147,7 +144,7 @@ namespace MultiSkyLineII
                 SetCurrentLocale(_settings.CurrentLocale);
                 ModDiagnostics.Write($"Settings applied: locale={CurrentLocale}");
                 RefreshLocalizationSource();
-                MultiplayerSettingsStorage.Save(_settings, log);
+                MultiplayerSettingsStorage.Save(_settings);
                 _network?.Restart(_settings);
             }
             finally
@@ -285,7 +282,7 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                log.Warn($"Failed to register localization source: {e.Message}");
+                ModDiagnostics.Warn($"Failed to register localization source: {e.Message}");
             }
         }
 
@@ -308,7 +305,7 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                log.Warn($"Failed to unregister localization source: {e.Message}");
+                ModDiagnostics.Warn($"Failed to unregister localization source: {e.Message}");
             }
             finally
             {
@@ -324,42 +321,6 @@ namespace MultiSkyLineII
             RegisterLocalizationSource();
         }
 
-        private void CreateHudOverlay()
-        {
-            try
-            {
-                var go = new GameObject("MultiSkyLineII_HUD");
-                UnityEngine.Object.DontDestroyOnLoad(go);
-                _hudOverlay = go.AddComponent<MultiplayerHudOverlay>();
-                _hudOverlay.Initialize(_network);
-                ModDiagnostics.Write("HUD overlay created.");
-            }
-            catch (Exception e)
-            {
-                log.Warn($"Failed to create HUD overlay: {e.Message}");
-                ModDiagnostics.Write($"HUD overlay creation failed: {e}");
-            }
-        }
-
-        private void DestroyHudOverlay()
-        {
-            if (_hudOverlay == null)
-                return;
-
-            try
-            {
-                var go = _hudOverlay.gameObject;
-                _hudOverlay = null;
-                UnityEngine.Object.Destroy(go);
-                ModDiagnostics.Write("HUD overlay destroyed.");
-            }
-            catch (Exception e)
-            {
-                log.Warn($"Failed to destroy HUD overlay: {e.Message}");
-                ModDiagnostics.Write($"HUD overlay destroy failed: {e}");
-            }
-        }
-
         private void CreateNativeUiBridge()
         {
             try
@@ -368,12 +329,12 @@ namespace MultiSkyLineII
                 UnityEngine.Object.DontDestroyOnLoad(go);
                 _nativeUiBridge = go.AddComponent<MultiplayerNativeUiBridge>();
                 _nativeUiBridge.Initialize(_network);
-                log.Info("Native UI bridge initialized.");
+                ModDiagnostics.Info("Native UI bridge initialized.");
                 ModDiagnostics.Write("Native UI bridge created and initialized.");
             }
             catch (Exception e)
             {
-                log.Warn($"Failed to create native UI bridge: {e.Message}");
+                ModDiagnostics.Warn($"Failed to create native UI bridge: {e.Message}");
                 ModDiagnostics.Write($"Native UI bridge creation failed: {e}");
             }
         }
@@ -392,7 +353,7 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                log.Warn($"Failed to destroy native UI bridge: {e.Message}");
+                ModDiagnostics.Warn($"Failed to destroy native UI bridge: {e.Message}");
                 ModDiagnostics.Write($"Native UI bridge destroy failed: {e}");
             }
         }

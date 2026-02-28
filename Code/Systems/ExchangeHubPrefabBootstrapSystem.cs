@@ -1,4 +1,5 @@
 using Game;
+using Game.Buildings;
 using Game.Prefabs;
 using System;
 using System.Collections.Generic;
@@ -10,9 +11,11 @@ namespace MultiSkyLineII
     public sealed partial class ExchangeHubPrefabBootstrapSystem : GameSystemBase
     {
         private const string ExchangeHubPrefabName = "MS2 Exchange Hub";
+        private const string PreferredBatteryPrefabName = "EmergencyBatteryStation01";
 
         private PrefabSystem _prefabSystem;
         private bool _attemptedRegistration;
+        private double _nextRetryTime;
 
         public static Entity ExchangeHubPrefabEntity { get; private set; } = Entity.Null;
 
@@ -26,6 +29,9 @@ namespace MultiSkyLineII
         {
             if (_attemptedRegistration)
                 return;
+            var now = World.Time.ElapsedTime;
+            if (now < _nextRetryTime)
+                return;
 
             _attemptedRegistration = true;
 
@@ -38,54 +44,22 @@ namespace MultiSkyLineII
                 return;
             }
 
-            var query = EntityManager.CreateEntityQuery(ComponentType.ReadOnly<TransformerData>());
-            if (query.IsEmptyIgnoreFilter)
+            if (!TryGetPreferredBatteryTemplate(out var preferredTemplate))
             {
-                ModDiagnostics.Write("ExchangeHub prefab registration skipped: no TransformerData template found yet.");
-                _attemptedRegistration = false;
-                return;
-            }
-
-            BuildingPrefab fallbackTemplateForRuntimeUse = null;
-            var templates = new List<BuildingPrefab>(32);
-
-            using (var candidates = query.ToEntityArray(Allocator.Temp))
-            {
-                for (var i = 0; i < candidates.Length; i++)
-                {
-                    if (!_prefabSystem.TryGetPrefab(candidates[i], out BuildingPrefab template) || template == null)
-                        continue;
-
-                    if (!_prefabSystem.HasComponent<UIObjectData>(template) || !_prefabSystem.HasComponent<PlaceableObjectData>(template))
-                        continue;
-
-                    if (fallbackTemplateForRuntimeUse == null)
-                        fallbackTemplateForRuntimeUse = template;
-                    templates.Add(template);
-                }
-            }
-
-            if (templates.Count > 0)
-            {
-                templates.Sort((a, b) => ScoreTemplate(b).CompareTo(ScoreTemplate(a)));
-
-                for (var i = 0; i < templates.Count; i++)
-                {
-                    if (TryCreateExchangeHubFromTemplate(templates[i]))
-                        return;
-                }
-            }
-
-            if (fallbackTemplateForRuntimeUse != null && _prefabSystem.TryGetEntity(fallbackTemplateForRuntimeUse, out var fallbackEntity))
-            {
-                ExchangeHubPrefabEntity = fallbackEntity;
                 ModDiagnostics.Write(
-                    $"ExchangeHub fallback active: using vanilla transformer prefab '{fallbackTemplateForRuntimeUse.name}' entity={ExchangeHubPrefabEntity}. " +
-                    "Custom prefab registration failed, but hub logic will work with this electricity-menu transformer.");
+                    $"ExchangeHub prefab registration skipped: preferred battery template '{PreferredBatteryPrefabName}' not found yet.");
+                _attemptedRegistration = false;
+                _nextRetryTime = now + 1.0;
                 return;
             }
 
-            ModDiagnostics.Write("ExchangeHub prefab registration failed: no compatible BuildingPrefab template found.");
+            ModDiagnostics.Write($"ExchangeHub trying battery template '{preferredTemplate.name}'");
+            if (TryCreateExchangeHubFromTemplate(preferredTemplate))
+                return;
+
+            ModDiagnostics.Write("ExchangeHub prefab registration failed: no compatible electricity BuildingPrefab template found.");
+            _attemptedRegistration = false;
+            _nextRetryTime = now + 1.0;
         }
 
         private bool TryCreateExchangeHubFromTemplate(BuildingPrefab template)
@@ -143,21 +117,59 @@ namespace MultiSkyLineII
             return true;
         }
 
-        private static int ScoreTemplate(BuildingPrefab template)
+        private bool TryGetPreferredBatteryTemplate(out BuildingPrefab template)
         {
-            var name = (template.name ?? string.Empty).ToLowerInvariant();
-            var score = 0;
+            template = null;
 
-            if (name.Contains("transformer"))
-                score += 100;
-            if (name.Contains("high") || name.Contains("hv"))
-                score += 50;
-            if (name.Contains("substation"))
-                score += 40;
-            if (name.Contains("sub") || name.Contains("dummy") || name.Contains("marker") || name.Contains("editor"))
-                score -= 120;
+            var preferredId = new PrefabID(nameof(BuildingPrefab), PreferredBatteryPrefabName);
+            if (_prefabSystem.TryGetPrefab(preferredId, out var byId) && byId is BuildingPrefab byIdBuilding)
+            {
+                template = byIdBuilding;
+                return true;
+            }
 
-            return score;
+            // Broad prefab lookup over all building-prefab entities currently loaded.
+            var buildingPrefabQuery = EntityManager.CreateEntityQuery(
+                ComponentType.ReadOnly<BuildingData>());
+            if (!buildingPrefabQuery.IsEmptyIgnoreFilter)
+            {
+                using (var candidates = buildingPrefabQuery.ToEntityArray(Allocator.Temp))
+                {
+                    for (var i = 0; i < candidates.Length; i++)
+                    {
+                        if (!_prefabSystem.TryGetPrefab(candidates[i], out PrefabBase candidateBase) ||
+                            candidateBase is not BuildingPrefab candidateBuilding)
+                            continue;
+                        if (!string.Equals(candidateBuilding.name, PreferredBatteryPrefabName, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        template = candidateBuilding;
+                        ModDiagnostics.Write($"ExchangeHub resolved preferred template from BuildingData query: '{candidateBuilding.name}'.");
+                        return true;
+                    }
+                }
+            }
+
+            var query = EntityManager.CreateEntityQuery(
+                ComponentType.ReadOnly<UIObjectData>(),
+                ComponentType.ReadOnly<PlaceableObjectData>());
+            if (query.IsEmptyIgnoreFilter)
+                return false;
+
+            using (var candidates = query.ToEntityArray(Allocator.Temp))
+            {
+                for (var i = 0; i < candidates.Length; i++)
+                {
+                    if (!_prefabSystem.TryGetPrefab(candidates[i], out BuildingPrefab candidate) || candidate == null)
+                        continue;
+                    if (!string.Equals(candidate.name, PreferredBatteryPrefabName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    template = candidate;
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void EnsureComponentCopied<T>(PrefabBase template, PrefabBase target)

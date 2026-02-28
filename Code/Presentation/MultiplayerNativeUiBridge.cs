@@ -26,6 +26,10 @@ namespace MultiSkyLineII
         private DateTime _uiHandshakeDeadlineUtc;
         private bool _uiHandshakeReceived;
         private bool _uiHandshakeTimeoutLogged;
+        private DateTime _nextUiPulseLogUtc;
+        private int _uiReadySinceLastLog;
+        private int _uiPingSinceLastLog;
+        private string _lastUiPingText = "<none>";
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -107,7 +111,7 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                Mod.log.Warn($"Failed to register native UI bindings: {e.Message}");
+                ModDiagnostics.Warn($"Failed to register native UI bindings: {e.Message}");
                 ModDiagnostics.Write($"NativeUiBridge bindings registration failed: {e}");
             }
         }
@@ -134,7 +138,7 @@ namespace MultiSkyLineII
                 return;
 
             _visible = next;
-            Mod.log.Info($"[NativeHUD] SetVisible -> {_visible} (inGameplay={inGameplay})");
+            ModDiagnostics.Info($"[NativeHUD] SetVisible -> {_visible} (inGameplay={inGameplay})");
             ModDiagnostics.Write($"NativeUiBridge.SetVisible({_visible}) inGameplay={inGameplay}");
             _visibleBinding?.Update(_visible);
             PublishSnapshot(force: true);
@@ -220,14 +224,29 @@ namespace MultiSkyLineII
         private void UiReady()
         {
             _uiHandshakeReceived = true;
-            Mod.log.Info("[NativeHUD] UI module mounted and handshake received.");
-            ModDiagnostics.Write("NativeUiBridge handshake from UI received (uiReady).");
+            _uiReadySinceLastLog++;
+            LogUiPulse(force: false);
         }
 
         private void UiPing(string message)
         {
-            var text = string.IsNullOrWhiteSpace(message) ? "<empty>" : message;
-            ModDiagnostics.Write($"NativeUiBridge uiPing: {text}");
+            _lastUiPingText = string.IsNullOrWhiteSpace(message) ? "<empty>" : message.Trim();
+            _uiPingSinceLastLog++;
+            var force = !_lastUiPingText.Equals("module heartbeat", StringComparison.OrdinalIgnoreCase);
+            LogUiPulse(force);
+        }
+
+        private void LogUiPulse(bool force)
+        {
+            var now = DateTime.UtcNow;
+            if (!force && now < _nextUiPulseLogUtc)
+                return;
+
+            _nextUiPulseLogUtc = now.AddSeconds(20);
+            ModDiagnostics.Write(
+                $"NativeUiBridge UI pulse: pingCount={_uiPingSinceLastLog}, readyCount={_uiReadySinceLastLog}, lastPing={_lastUiPingText}, handshake={_uiHandshakeReceived}");
+            _uiPingSinceLastLog = 0;
+            _uiReadySinceLastLog = 0;
         }
 
         private void SetUiMessage(string message)

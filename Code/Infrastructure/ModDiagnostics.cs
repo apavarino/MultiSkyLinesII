@@ -34,6 +34,21 @@ namespace MultiSkyLineII
             }
         }
 
+        public static void Info(string message)
+        {
+            Write($"[INFO] {message}");
+        }
+
+        public static void Warn(string message)
+        {
+            Write($"[WARN] {message}");
+        }
+
+        public static void Error(string message)
+        {
+            Write($"[ERROR] {message}");
+        }
+
         public static void Write(string message)
         {
             EnsureInitialized();
@@ -76,3 +91,4 @@ namespace MultiSkyLineII
         }
     }
 }
+

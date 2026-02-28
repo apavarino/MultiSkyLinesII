@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
-using Colossal.Logging;
 using UnityEngine;
 
 namespace MultiSkyLineII
@@ -13,7 +12,7 @@ namespace MultiSkyLineII
         private static readonly string FilePath = Path.Combine(DirectoryPath, "settings.cfg");
         public static string SelectedLocale { get; private set; } = "en-US";
 
-        public static void Load(MultiplayerSettings settings, ILog log)
+        public static void Load(MultiplayerSettings settings)
         {
             if (settings == null || !File.Exists(FilePath))
             {
@@ -82,11 +81,11 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                log?.Warn($"Failed to load settings from disk: {e.Message}");
+                ModDiagnostics.Warn($"Failed to load settings from disk: {e.Message}");
             }
         }
 
-        public static void Save(MultiplayerSettings settings, ILog log)
+        public static void Save(MultiplayerSettings settings)
         {
             if (settings == null)
                 return;
@@ -111,7 +110,7 @@ namespace MultiSkyLineII
             }
             catch (Exception e)
             {
-                log?.Warn($"Failed to save settings to disk: {e.Message}");
+                ModDiagnostics.Warn($"Failed to save settings to disk: {e.Message}");
             }
         }
     }

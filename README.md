@@ -1,4 +1,10 @@
+<p align="center">
+  <img src="Properties/Thumbnail.png" alt="MultiSkyLines II logo" />
+</p>
+
 # MS2 - MultiSkyLines II
+
+City Skylines II Mulitplayer Mod
 
 Bring your cities together with a real-time multiplayer resource trading experience.
 
@@ -27,3 +33,30 @@ Bring your cities together with a real-time multiplayer resource trading experie
 - For remote play, use the host public/local IP (not localhost).
 - If anything desyncs, check the HUD Debug tab logs first.
 - Contracts can produce incorrect behavior for now; use them as test/preview functionality.
+
+## Build
+
+### Prerequisites
+- .NET SDK installed (`dotnet` command available)
+- Cities Skylines II modding toolchain configured (as used by this project)
+- Node.js/npm for UI build (triggered by the project build)
+
+### Compile the full solution
+```powershell
+dotnet build MultiSkyLineII.sln -nologo
+```
+
+### Compile only the main mod project
+```powershell
+dotnet build MultiSkyLineII.csproj -nologo
+```
+
+## Tests
+
+### Run all unit tests
+```powershell
+dotnet test tests\MultiSkyLineII.Tests\MultiSkyLineII.Tests.csproj -nologo
+```
+
+### Test project location
+- `tests/MultiSkyLineII.Tests/MultiSkyLineII.Tests.csproj`

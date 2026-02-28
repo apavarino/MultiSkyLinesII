@@ -35,13 +35,11 @@ function packRespond(id, accept) {
 function bridgeHeartbeat(message) {
   try {
     safeTrigger("uiPing", message);
-    safeTrigger("uiReady");
   } catch (_e) {
   }
   try {
     if (typeof engine !== "undefined" && engine && typeof engine.trigger === "function") {
       engine.trigger(GROUP, "uiPing", message);
-      engine.trigger(GROUP, "uiReady");
     }
   } catch (_e) {
   }

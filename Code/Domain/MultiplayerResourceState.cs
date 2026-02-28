@@ -5,37 +5,17 @@ using Game.Simulation;
 using Unity.Entities;
 using UnityEngine;
 using System.Reflection;
+using System.Linq;
 
 namespace MultiSkyLineII
 {
-    public struct MultiplayerResourceState
-    {
-        public string Name;
-        public int Money;
-        public int Population;
-        public int ElectricityProduction;
-        public int ElectricityConsumption;
-        public int ElectricityFulfilledConsumption;
-        public int FreshWaterCapacity;
-        public int FreshWaterConsumption;
-        public int FreshWaterFulfilledConsumption;
-        public int SewageCapacity;
-        public int SewageConsumption;
-        public int SewageFulfilledConsumption;
-        public int PingMs;
-        public bool HasElectricityOutsideConnection;
-        public bool HasWaterOutsideConnection;
-        public bool HasSewageOutsideConnection;
-        public bool IsPaused;
-        public int SimulationSpeed;
-        public string SimulationDateText;
-        public DateTime TimestampUtc;
-    }
-
     public static class MultiplayerResourceReader
     {
         private static readonly BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
         private static readonly object UtilitySync = new object();
+        private static readonly System.Collections.Generic.HashSet<long> LoggedHubSelections = new System.Collections.Generic.HashSet<long>();
+        private static DateTime LastNoDeltaWarnUtc = DateTime.MinValue;
+        private static DateTime LastElectricityDiagUtc = DateTime.MinValue;
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedWaterByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedSewageByEntity = new System.Collections.Generic.Dictionary<long, int>();
@@ -44,6 +24,25 @@ namespace MultiSkyLineII
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedSewageEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubProducerByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubConsumerByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubProducerEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubConsumerEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+
+        public static bool HasUtilityOverrides()
+        {
+            lock (UtilitySync)
+            {
+                return AppliedElecByEntity.Count > 0 ||
+                       AppliedWaterByEntity.Count > 0 ||
+                       AppliedSewageByEntity.Count > 0 ||
+                       AppliedElecEdgeByEntity.Count > 0 ||
+                       AppliedWaterEdgeByEntity.Count > 0 ||
+                       AppliedSewageEdgeByEntity.Count > 0 ||
+                       AppliedElecHubProducerByEntity.Count > 0 ||
+                       AppliedElecHubConsumerByEntity.Count > 0 ||
+                       AppliedElecHubProducerEdgeByEntity.Count > 0 ||
+                       AppliedElecHubConsumerEdgeByEntity.Count > 0;
+            }
+        }
 
         public static bool HasActiveCity()
         {
@@ -217,12 +216,39 @@ namespace MultiSkyLineII
                 var entityManager = world.EntityManager;
                 lock (UtilitySync)
                 {
+                    var electricityHubCount = CollectElectricityHubEntities(entityManager).Count;
                     var elecImportTarget = Math.Max(0, electricityTarget);
                     var elecExportTarget = Math.Max(0, -electricityTarget);
                     // Apply contracts on dedicated in-city exchange hubs (transformer buildings connected to power grid).
                     var elecProducerDelta = SetElectricityHubProducerTarget(entityManager, elecImportTarget);
                     var elecConsumerDelta = SetElectricityHubConsumerTarget(entityManager, elecExportTarget);
                     appliedElectricity = elecProducerDelta - elecConsumerDelta;
+                    var appliedProducerTarget = SumAppliedValues(AppliedElecHubProducerByEntity);
+                    var appliedConsumerTarget = SumAppliedValues(AppliedElecHubConsumerByEntity);
+                    var appliedProducerEdgeTarget = SumAppliedValues(AppliedElecHubProducerEdgeByEntity);
+                    var appliedConsumerEdgeTarget = SumAppliedValues(AppliedElecHubConsumerEdgeByEntity);
+                    var producerTargetReached = elecImportTarget == appliedProducerTarget || elecImportTarget == appliedProducerEdgeTarget;
+                    var consumerTargetReached = elecExportTarget == appliedConsumerTarget || elecExportTarget == appliedConsumerEdgeTarget;
+                    var targetAlreadyApplied = producerTargetReached && consumerTargetReached;
+                    if (electricityTarget != 0)
+                    {
+                        var nowDiag = DateTime.UtcNow;
+                        if ((nowDiag - LastElectricityDiagUtc).TotalSeconds >= 5)
+                        {
+                            LastElectricityDiagUtc = nowDiag;
+                            ModDiagnostics.Info(
+                                $"Electricity diag target={electricityTarget} hubs={electricityHubCount} appliedDelta={appliedElectricity} producer={appliedProducerTarget} producerEdge={appliedProducerEdgeTarget} consumer={appliedConsumerTarget} consumerEdge={appliedConsumerEdgeTarget}");
+                        }
+                    }
+                    if (electricityTarget != 0 && appliedElectricity == 0 && !targetAlreadyApplied)
+                    {
+                        var now = DateTime.UtcNow;
+                        if ((now - LastNoDeltaWarnUtc).TotalSeconds >= 5)
+                        {
+                            LastNoDeltaWarnUtc = now;
+                            ModDiagnostics.Warn($"Electricity target {electricityTarget} produced no applied delta on hubs. Detected hubs={electricityHubCount}. producer={appliedProducerTarget}, producerEdge={appliedProducerEdgeTarget}, consumer={appliedConsumerTarget}, consumerEdge={appliedConsumerEdgeTarget}");
+                        }
+                    }
 
                     var waterProducerDelta = SetWaterPumpTarget(entityManager, Math.Min(0, waterTarget));
                     var waterEdgeDelta = SetWaterOutsideEdgeTarget(entityManager, Math.Max(0, waterTarget), false);
@@ -307,42 +333,178 @@ namespace MultiSkyLineII
         private static int SetElectricityHubProducerTarget(EntityManager entityManager, int target)
         {
             var hubs = CollectElectricityHubEntities(entityManager);
-            if (hubs.Count == 0)
+            var injections = CollectElectricityHubInjectionEntities(entityManager, hubs);
+            var directEdges = CollectElectricityHubConnectionEdges(entityManager, hubs, producerDirection: true);
+            if (injections.Count == 0)
             {
                 AppliedElecHubProducerByEntity.Clear();
                 return 0;
             }
 
-            EnsureElectricityHubComponents(entityManager, hubs, ensureProducer: true, ensureConsumer: false);
-            return ReconcileProducerCapacityTarget(
-                ToNativeArray(hubs),
-                target,
-                AppliedElecHubProducerByEntity,
-                entity => entityManager.GetComponentData<ElectricityProducer>(entity).m_Capacity,
-                (entity, value) =>
-                {
-                    var c = entityManager.GetComponentData<ElectricityProducer>(entity);
-                    c.m_Capacity = value;
-                    entityManager.SetComponentData(entity, c);
-                });
+            EnsureElectricityHubComponents(entityManager, injections, ensureProducer: true, ensureConsumer: false);
+            var applied = ApplyHubProducerTargetAbsolute(entityManager, injections, target, AppliedElecHubProducerByEntity);
+            var edgeApplied = SetElectricityHubEdgeTarget(entityManager, injections, directEdges, target, AppliedElecHubProducerEdgeByEntity);
+            // Force effective production on hub-side entities even when base capacity already equals target.
+            ForceHubProducerLastProduction(entityManager, injections, target);
+            return applied + edgeApplied;
         }
 
         private static int SetElectricityHubConsumerTarget(EntityManager entityManager, int target)
         {
             var hubs = CollectElectricityHubEntities(entityManager);
-            if (hubs.Count == 0)
+            var injections = CollectElectricityHubInjectionEntities(entityManager, hubs);
+            var directEdges = CollectElectricityHubConnectionEdges(entityManager, hubs, producerDirection: false);
+            if (injections.Count == 0)
             {
                 AppliedElecHubConsumerByEntity.Clear();
                 return 0;
             }
 
-            EnsureElectricityHubComponents(entityManager, hubs, ensureProducer: false, ensureConsumer: true);
-            return ReconcileElectricityConsumerTarget(
-                ToNativeArray(hubs),
+            EnsureElectricityHubComponents(entityManager, injections, ensureProducer: false, ensureConsumer: true);
+            var applied = ApplyHubConsumerTargetAbsolute(entityManager, injections, target, AppliedElecHubConsumerByEntity);
+            var edgeApplied = SetElectricityHubEdgeTarget(entityManager, injections, directEdges, target, AppliedElecHubConsumerEdgeByEntity);
+            return applied + edgeApplied;
+        }
+
+        private static int ApplyHubProducerTargetAbsolute(
+            EntityManager entityManager,
+            System.Collections.Generic.List<Entity> injections,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity)
+        {
+            var appliedDelta = 0;
+            var positiveTarget = Math.Max(0, target);
+            var count = injections.Count;
+            var perEntity = count > 0 ? positiveTarget / count : 0;
+            var remainder = count > 0 ? positiveTarget - perEntity * count : 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                var entity = injections[i];
+                if (!entityManager.HasComponent<ElectricityProducer>(entity))
+                    continue;
+
+                var desired = perEntity + (i == 0 ? remainder : 0);
+                var current = entityManager.GetComponentData<ElectricityProducer>(entity);
+                var before = Math.Max(0, current.m_Capacity);
+                if (before != desired)
+                {
+                    current.m_Capacity = desired;
+                    entityManager.SetComponentData(entity, current);
+                }
+
+                appliedDelta += desired - before;
+                var key = GetEntityKey(entity);
+                if (desired == 0)
+                    appliedByEntity.Remove(key);
+                else
+                    appliedByEntity[key] = desired;
+            }
+
+            return appliedDelta;
+        }
+
+        private static int ApplyHubConsumerTargetAbsolute(
+            EntityManager entityManager,
+            System.Collections.Generic.List<Entity> injections,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity)
+        {
+            var appliedDelta = 0;
+            var positiveTarget = Math.Max(0, target);
+            var count = injections.Count;
+            var perEntity = count > 0 ? positiveTarget / count : 0;
+            var remainder = count > 0 ? positiveTarget - perEntity * count : 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                var entity = injections[i];
+                if (!entityManager.HasComponent<ElectricityConsumer>(entity))
+                    continue;
+
+                var desired = perEntity + (i == 0 ? remainder : 0);
+                var consumer = entityManager.GetComponentData<ElectricityConsumer>(entity);
+                var before = Math.Max(0, consumer.m_WantedConsumption);
+                if (before != desired || consumer.m_FulfilledConsumption > desired)
+                {
+                    consumer.m_WantedConsumption = desired;
+                    if (consumer.m_FulfilledConsumption > desired)
+                        consumer.m_FulfilledConsumption = desired;
+                    entityManager.SetComponentData(entity, consumer);
+                }
+
+                appliedDelta += desired - before;
+                var key = GetEntityKey(entity);
+                if (desired == 0)
+                    appliedByEntity.Remove(key);
+                else
+                    appliedByEntity[key] = desired;
+            }
+
+            return appliedDelta;
+        }
+
+        private static int SetElectricityHubEdgeTarget(
+            EntityManager entityManager,
+            System.Collections.Generic.List<Entity> injections,
+            System.Collections.Generic.List<Entity> directEdges,
+            int target,
+            System.Collections.Generic.Dictionary<long, int> appliedByEntity)
+        {
+            var edges = CollectConnectedElectricityEdges(entityManager, injections);
+            if (directEdges.Count > 0)
+            {
+                var seen = new System.Collections.Generic.HashSet<long>(edges.Select(GetEntityKey));
+                for (var i = 0; i < directEdges.Count; i++)
+                {
+                    var edge = directEdges[i];
+                    if (edge == Entity.Null || !entityManager.Exists(edge) || !entityManager.HasComponent<ElectricityFlowEdge>(edge))
+                        continue;
+
+                    var key = GetEntityKey(edge);
+                    if (seen.Add(key))
+                        edges.Add(edge);
+                }
+            }
+            if (edges.Count == 0)
+            {
+                appliedByEntity.Clear();
+                return 0;
+            }
+
+            return ReconcileEdgeCapacityTarget(
+                edges,
                 target,
-                AppliedElecHubConsumerByEntity,
-                entity => entityManager.GetComponentData<ElectricityConsumer>(entity),
-                (entity, value) => entityManager.SetComponentData(entity, value));
+                appliedByEntity,
+                entity => entityManager.GetComponentData<ElectricityFlowEdge>(entity).m_Capacity,
+                (entity, value) =>
+                {
+                    var edge = entityManager.GetComponentData<ElectricityFlowEdge>(entity);
+                    edge.m_Capacity = value;
+                    entityManager.SetComponentData(entity, edge);
+                });
+        }
+
+        private static void ForceHubProducerLastProduction(EntityManager entityManager, System.Collections.Generic.List<Entity> injections, int target)
+        {
+            if (target <= 0 || injections.Count == 0)
+                return;
+
+            var perEntity = Math.Max(1, target / injections.Count);
+            var remainder = Math.Max(0, target - perEntity * injections.Count);
+            for (var i = 0; i < injections.Count; i++)
+            {
+                var entity = injections[i];
+                if (!entityManager.HasComponent<ElectricityProducer>(entity))
+                    continue;
+
+                var producer = entityManager.GetComponentData<ElectricityProducer>(entity);
+                var forced = perEntity + (i == 0 ? remainder : 0);
+                if (producer.m_Capacity < forced)
+                    producer.m_Capacity = forced;
+                producer.m_LastProduction = forced;
+                entityManager.SetComponentData(entity, producer);
+            }
         }
 
         private static int SetWaterOutsideEdgeTarget(EntityManager entityManager, int target, bool sewage)
@@ -666,14 +828,13 @@ namespace MultiSkyLineII
         {
             var result = new System.Collections.Generic.List<Entity>();
             var query = entityManager.CreateEntityQuery(
-                ComponentType.ReadOnly<Transformer>(),
+                ComponentType.ReadOnly<Building>(),
                 ComponentType.ReadOnly<Game.Prefabs.PrefabRef>());
             if (query.IsEmptyIgnoreFilter)
                 return result;
 
             var hubPrefab = ExchangeHubPrefabBootstrapSystem.ExchangeHubPrefabEntity;
-            if (hubPrefab == Entity.Null)
-                return result;
+            var prefabSystem = World.DefaultGameObjectInjectionWorld?.GetExistingSystemManaged<Game.Prefabs.PrefabSystem>();
 
             var entities = query.ToEntityArray(Unity.Collections.Allocator.Temp);
             try
@@ -681,7 +842,12 @@ namespace MultiSkyLineII
                 for (var i = 0; i < entities.Length; i++)
                 {
                     var prefabRef = entityManager.GetComponentData<Game.Prefabs.PrefabRef>(entities[i]);
-                    if (prefabRef.m_Prefab != hubPrefab)
+                    var isHub = hubPrefab != Entity.Null && prefabRef.m_Prefab == hubPrefab;
+                    if (!isHub && prefabSystem != null && prefabSystem.TryGetPrefab(prefabRef.m_Prefab, out Game.Prefabs.PrefabBase prefab) && prefab != null)
+                    {
+                        isHub = string.Equals(prefab.name, "MS2 Exchange Hub", StringComparison.OrdinalIgnoreCase);
+                    }
+                    if (!isHub)
                         continue;
 
                     result.Add(entities[i]);
@@ -694,6 +860,151 @@ namespace MultiSkyLineII
 
             return result;
         }
+
+        private static System.Collections.Generic.List<Entity> CollectElectricityHubInjectionEntities(EntityManager entityManager, System.Collections.Generic.List<Entity> hubs)
+        {
+            var result = new System.Collections.Generic.List<Entity>(hubs.Count * 6);
+            var seen = new System.Collections.Generic.HashSet<long>();
+            for (var i = 0; i < hubs.Count; i++)
+            {
+                var hub = hubs[i];
+                AddInjectionCandidate(entityManager, hub, seen, result);
+                AddElectricityConnectionCandidates(entityManager, hub, seen, result);
+            }
+
+            return result;
+        }
+
+        private static void AddElectricityConnectionCandidates(
+            EntityManager entityManager,
+            Entity hub,
+            System.Collections.Generic.HashSet<long> seen,
+            System.Collections.Generic.List<Entity> result)
+        {
+            if (!entityManager.HasComponent<ElectricityBuildingConnection>(hub))
+                return;
+
+            var c = entityManager.GetComponentData<ElectricityBuildingConnection>(hub);
+            AddInjectionCandidate(entityManager, c.m_TransformerNode, seen, result);
+            AddEdgeEndpointNodes(entityManager, c.m_ProducerEdge, seen, result);
+            AddEdgeEndpointNodes(entityManager, c.m_ConsumerEdge, seen, result);
+            AddEdgeEndpointNodes(entityManager, c.m_ChargeEdge, seen, result);
+            AddEdgeEndpointNodes(entityManager, c.m_DischargeEdge, seen, result);
+        }
+
+        private static void AddEdgeEndpointNodes(
+            EntityManager entityManager,
+            Entity edgeEntity,
+            System.Collections.Generic.HashSet<long> seen,
+            System.Collections.Generic.List<Entity> result)
+        {
+            if (edgeEntity == Entity.Null || !entityManager.Exists(edgeEntity) || !entityManager.HasComponent<ElectricityFlowEdge>(edgeEntity))
+                return;
+
+            var edge = entityManager.GetComponentData<ElectricityFlowEdge>(edgeEntity);
+            AddInjectionCandidate(entityManager, edge.m_Start, seen, result);
+            AddInjectionCandidate(entityManager, edge.m_End, seen, result);
+        }
+
+        private static System.Collections.Generic.List<Entity> CollectElectricityHubConnectionEdges(
+            EntityManager entityManager,
+            System.Collections.Generic.List<Entity> hubs,
+            bool producerDirection)
+        {
+            var result = new System.Collections.Generic.List<Entity>(hubs.Count * 2);
+            var seen = new System.Collections.Generic.HashSet<long>();
+
+            for (var i = 0; i < hubs.Count; i++)
+            {
+                var hub = hubs[i];
+                if (!entityManager.HasComponent<ElectricityBuildingConnection>(hub))
+                    continue;
+
+                var c = entityManager.GetComponentData<ElectricityBuildingConnection>(hub);
+                if (producerDirection)
+                {
+                    AddConnectionEdge(entityManager, c.m_ProducerEdge, seen, result);
+                    AddConnectionEdge(entityManager, c.m_DischargeEdge, seen, result);
+                }
+                else
+                {
+                    AddConnectionEdge(entityManager, c.m_ConsumerEdge, seen, result);
+                    AddConnectionEdge(entityManager, c.m_ChargeEdge, seen, result);
+                }
+            }
+
+            return result;
+        }
+
+        private static void AddConnectionEdge(
+            EntityManager entityManager,
+            Entity edgeEntity,
+            System.Collections.Generic.HashSet<long> seen,
+            System.Collections.Generic.List<Entity> result)
+        {
+            if (edgeEntity == Entity.Null || !entityManager.Exists(edgeEntity) || !entityManager.HasComponent<ElectricityFlowEdge>(edgeEntity))
+                return;
+
+            var key = GetEntityKey(edgeEntity);
+            if (!seen.Add(key))
+                return;
+            result.Add(edgeEntity);
+        }
+
+        private static int SumAppliedValues(System.Collections.Generic.Dictionary<long, int> appliedByEntity)
+        {
+            var sum = 0;
+            foreach (var value in appliedByEntity.Values)
+            {
+                sum += value;
+            }
+
+            return sum;
+        }
+
+        private static void AddInjectionCandidate(EntityManager entityManager, Entity entity, System.Collections.Generic.HashSet<long> seen, System.Collections.Generic.List<Entity> result)
+        {
+            if (!entityManager.Exists(entity))
+                return;
+
+            var key = GetEntityKey(entity);
+            if (!seen.Add(key))
+                return;
+
+            result.Add(entity);
+        }
+
+        private static System.Collections.Generic.List<Entity> CollectConnectedElectricityEdges(EntityManager entityManager, System.Collections.Generic.List<Entity> nodes)
+        {
+            var result = new System.Collections.Generic.List<Entity>();
+            var seen = new System.Collections.Generic.HashSet<long>();
+            for (var i = 0; i < nodes.Count; i++)
+            {
+                var node = nodes[i];
+                if (!entityManager.Exists(node) || !entityManager.HasBuffer<ConnectedFlowEdge>(node))
+                    continue;
+
+                var connected = entityManager.GetBuffer<ConnectedFlowEdge>(node);
+                for (var j = 0; j < connected.Length; j++)
+                {
+                    var edgeEntity = connected[j].m_Edge;
+                    if (edgeEntity == Entity.Null || !entityManager.Exists(edgeEntity))
+                        continue;
+                    if (!entityManager.HasComponent<ElectricityFlowEdge>(edgeEntity))
+                        continue;
+
+                    var key = GetEntityKey(edgeEntity);
+                    if (!seen.Add(key))
+                        continue;
+
+                    result.Add(edgeEntity);
+                }
+            }
+
+            return result;
+        }
+
+        private static void LogHubSelectionOnce(Entity hub, Entity selected, string fieldName, int score) { }
 
         private static void EnsureElectricityHubComponents(EntityManager entityManager, System.Collections.Generic.List<Entity> hubs, bool ensureProducer, bool ensureConsumer)
         {
