@@ -22,6 +22,14 @@ module.exports = {
   experiments: {
     outputModule: true
   },
+  module: {
+    rules: [
+      {
+        test: /\.svg$/i,
+        type: "asset/inline"
+      }
+    ]
+  },
   externalsType: "window",
   externals: {
     react: "React",

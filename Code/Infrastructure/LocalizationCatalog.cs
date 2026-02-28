@@ -60,7 +60,11 @@ namespace MultiSkyLineII
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                var filePath = Path.Combine(Application.persistentDataPath, "Mods", "MultiSkyLineII", "Localization", $"{locale}.json");
+                var filePath = Path.Combine(Application.persistentDataPath, "Mods", "MultiSkyLinesII", "Localization", $"{locale}.json");
+                if (!File.Exists(filePath))
+                {
+                    filePath = Path.Combine(Application.persistentDataPath, "Mods", "MultiSkyLineII", "Localization", $"{locale}.json");
+                }
                 if (!File.Exists(filePath))
                     return map;
 

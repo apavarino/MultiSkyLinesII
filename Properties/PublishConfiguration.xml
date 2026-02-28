@@ -44,7 +44,7 @@ Bring your cities together with a real-time multiplayer resource trading experie
   <!--Link to the forum post where the mod can be discussed-->
   <ForumLink Value="" />
   <!--Version of the mod-->
-  <ModVersion Value="1.45" />
+  <ModVersion Value="1.46" />
   <!--Recommended version of the base game to use the mod-->
   <GameVersion Value="1.5.*" />
   <!--Dependency for the mod, can be set multiple times-->
@@ -52,11 +52,9 @@ Bring your cities together with a real-time multiplayer resource trading experie
   <!--Required DLC, can be set multiple times. Supported values are "Landmark Buildings", "San Fransisco Set", "Beach Properties", "Urban Promenades", "Modern Architecture"-->
   <RequiredDLC Value="" />
   <!--Change log for new version. Loaded from Properties/ChangeLog.md during build-->
-  <ChangeLog>## 1.44
-
-- Removed contracts experimental toggle: contracts are now always active.
-- Kept native CS2 UI and custom exchange hub flow active by default.
-- Stability and diagnostics improvements on UI/network bridge.</ChangeLog>
+  <ChangeLog>- Rework UI
+- Rework all code base
+- Adding trash stats</ChangeLog>
   <!--External link, can be set multiple times. supported types are "discord", "github", "youtube", "twitch", "x", "paypal", "patreon", "buymeacoffee", "kofi", "crowdin", "gitlab", "gofundme"-->
   <ExternalLink Type="github" Url="https://github.com/apavarino/MultiSkyLinesII" />
   <!--Supported values Public, Private, Unlisted-->

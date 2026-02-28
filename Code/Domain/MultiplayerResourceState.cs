@@ -6,6 +6,7 @@ using Unity.Entities;
 using UnityEngine;
 using System.Reflection;
 using System.Linq;
+using System.Text;
 
 namespace MultiSkyLineII
 {
@@ -25,6 +26,22 @@ namespace MultiSkyLineII
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubConsumerByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubProducerEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
         private static readonly System.Collections.Generic.Dictionary<long, int> AppliedElecHubConsumerEdgeByEntity = new System.Collections.Generic.Dictionary<long, int>();
+        private static Type CachedGarbageSystemType;
+        private static string CachedGarbageProductionMember;
+        private static string CachedGarbageCapacityMember;
+        private static string CachedGarbageProcessedMember;
+        private static DateTime LastGarbageDiscoveryLogUtc = DateTime.MinValue;
+        private static DateTime NextGarbageScanUtc = DateTime.MinValue;
+        private static DateTime NextGarbageDeepDumpUtc = DateTime.MinValue;
+        private static int CachedGarbageProductionValue;
+        private static int CachedGarbageProcessingCapacityValue;
+        private static int CachedGarbageProcessedValue;
+        private static bool HasCachedGarbageValues;
+        private static DateTime NextGarbageRefreshUtc = DateTime.MinValue;
+        private static bool CachedHasElectricityOutsideConnection;
+        private static bool CachedHasWaterOutsideConnection;
+        private static bool CachedHasSewageOutsideConnection;
+        private static DateTime NextOutsideConnectionRefreshUtc = DateTime.MinValue;
 
         public static bool HasUtilityOverrides()
         {
@@ -89,6 +106,9 @@ namespace MultiSkyLineII
                 state.HasElectricityOutsideConnection = false;
                 state.HasWaterOutsideConnection = false;
                 state.HasSewageOutsideConnection = false;
+                state.GarbageProduction = HasCachedGarbageValues ? CachedGarbageProductionValue : 0;
+                state.GarbageProcessingCapacity = HasCachedGarbageValues ? CachedGarbageProcessingCapacityValue : 0;
+                state.GarbageProcessed = HasCachedGarbageValues ? CachedGarbageProcessedValue : 0;
 
                 var moneyQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<PlayerMoney>());
                 if (!moneyQuery.IsEmptyIgnoreFilter)
@@ -125,9 +145,47 @@ namespace MultiSkyLineII
                     hasData = true;
                 }
 
-                state.HasElectricityOutsideConnection = HasConnectedElectricityOutside(entityManager);
-                state.HasWaterOutsideConnection = HasConnectedWaterOutside(entityManager);
-                state.HasSewageOutsideConnection = HasConnectedSewageOutside(entityManager);
+                var nowUtc = DateTime.UtcNow;
+                if (NextGarbageRefreshUtc == DateTime.MinValue)
+                {
+                    // Defer first garbage sampling a bit to avoid hitching on the first UI open.
+                    NextGarbageRefreshUtc = nowUtc.AddSeconds(4);
+                }
+                else if (nowUtc >= NextGarbageRefreshUtc)
+                {
+                    if (TryReadGarbageStats(world, out var garbageProduction, out var garbageProcessingCapacity, out var garbageProcessed))
+                    {
+                        CachedGarbageProductionValue = garbageProduction;
+                        CachedGarbageProcessingCapacityValue = garbageProcessingCapacity;
+                        CachedGarbageProcessedValue = garbageProcessed;
+                        HasCachedGarbageValues = true;
+                        state.GarbageProduction = garbageProduction;
+                        state.GarbageProcessingCapacity = garbageProcessingCapacity;
+                        state.GarbageProcessed = garbageProcessed;
+                        hasData = true;
+                    }
+
+                    // Always throttle retries, even when values are zero or unavailable.
+                    NextGarbageRefreshUtc = nowUtc.AddSeconds(10);
+                }
+
+                if (HasCachedGarbageValues)
+                {
+                    // Keep the panel responsive: reuse last known values while background refresh waits.
+                    hasData = true;
+                }
+
+                if (DateTime.UtcNow >= NextOutsideConnectionRefreshUtc)
+                {
+                    CachedHasElectricityOutsideConnection = HasConnectedElectricityOutside(entityManager);
+                    CachedHasWaterOutsideConnection = HasConnectedWaterOutside(entityManager);
+                    CachedHasSewageOutsideConnection = HasConnectedSewageOutside(entityManager);
+                    NextOutsideConnectionRefreshUtc = DateTime.UtcNow.AddSeconds(3);
+                }
+
+                state.HasElectricityOutsideConnection = CachedHasElectricityOutsideConnection;
+                state.HasWaterOutsideConnection = CachedHasWaterOutsideConnection;
+                state.HasSewageOutsideConnection = CachedHasSewageOutsideConnection;
 
                 return hasData;
             }
@@ -1227,6 +1285,749 @@ namespace MultiSkyLineII
             if (timeScale < 3f)
                 return 2;
             return 3;
+        }
+
+        private static bool TryReadGarbageStats(World world, out int garbageProduction, out int garbageProcessingCapacity, out int garbageProcessed)
+        {
+            garbageProduction = 0;
+            garbageProcessingCapacity = 0;
+            garbageProcessed = 0;
+
+            if (world == null)
+                return false;
+
+            // Fast path first to keep UI responsive.
+            var hasFast = TryReadGarbageStatsFromEcs(world, out garbageProduction, out garbageProcessingCapacity, out garbageProcessed);
+            if (hasFast && garbageProcessed > 0)
+                return true;
+
+            // Slow fallback only occasionally when processed value stays unavailable.
+            var now = DateTime.UtcNow;
+            if (now < NextGarbageScanUtc)
+                return hasFast;
+            NextGarbageScanUtc = now.AddSeconds(10);
+
+            var hasUiFallback = TryReadGarbageStatsFromUiBindings(world, out var uiProduction, out var uiCapacity, out var uiProcessed);
+            if (hasUiFallback)
+            {
+                if (garbageProduction <= 0 && uiProduction > 0)
+                    garbageProduction = uiProduction;
+                if (garbageProcessingCapacity <= 0 && uiCapacity > 0)
+                    garbageProcessingCapacity = uiCapacity;
+                if (garbageProcessed <= 0 && uiProcessed > 0)
+                    garbageProcessed = uiProcessed;
+            }
+
+            if (garbageProcessed > 0)
+                return true;
+
+            var hasScanFallback = TryReadGarbageStatsFromSimulationScan(world, out var scanProduction, out var scanCapacity, out var scanProcessed);
+            if (hasScanFallback)
+            {
+                if (garbageProduction <= 0 && scanProduction > 0)
+                    garbageProduction = scanProduction;
+                if (garbageProcessingCapacity <= 0 && scanCapacity > 0)
+                    garbageProcessingCapacity = scanCapacity;
+                if (garbageProcessed <= 0 && scanProcessed > 0)
+                    garbageProcessed = scanProcessed;
+            }
+
+            if (garbageProcessed <= 0)
+            {
+                MaybeLogGarbageDeepScan(world);
+            }
+
+            return hasFast || hasUiFallback || hasScanFallback;
+        }
+
+        private static bool TryReadGarbageStatsFromUiBindings(World world, out int garbageProduction, out int garbageProcessingCapacity, out int garbageProcessed)
+        {
+            garbageProduction = 0;
+            garbageProcessingCapacity = 0;
+            garbageProcessed = 0;
+            if (world == null)
+                return false;
+
+            var uiType = ResolveFirstType("Game.UI.InGame.GarbageInfoviewUISystem");
+            if (uiType == null || !TryGetExistingSystemManaged(world, uiType, out var uiSystem) || uiSystem == null)
+                return false;
+
+            var hasGarbageRate = TryReadGetterBindingNumeric(uiSystem, "m_GarbageRate", out var garbageRate);
+            var hasProcessingRate = TryReadGetterBindingNumeric(uiSystem, "m_ProcessingRate", out var processingRate);
+            var hasCapacity = TryReadGetterBindingNumeric(uiSystem, "m_Capacity", out var capacity);
+            var hasStored = TryReadGetterBindingNumeric(uiSystem, "m_StoredGarbage", out var stored);
+
+            if (!(hasGarbageRate || hasProcessingRate || hasCapacity || hasStored))
+                return false;
+
+            garbageProduction = Mathf.Max(0, Mathf.RoundToInt((float)Math.Max(0d, garbageRate)));
+            // "Processed" has no direct integer in this UI system; processing rate is the closest live metric.
+            garbageProcessed = Mathf.Max(0, Mathf.RoundToInt((float)Math.Max(0d, processingRate)));
+            // Prefer capacity binding; if unavailable, fallback to stored garbage so UI does not stay at zero.
+            garbageProcessingCapacity = Mathf.Max(0, Mathf.RoundToInt((float)Math.Max(0d, hasCapacity ? capacity : stored)));
+
+            MaybeLogGarbageDiscovery(
+                $"UI garbage fallback: rate={garbageProduction} processing={garbageProcessed} capacity={garbageProcessingCapacity} stored={Mathf.Max(0, Mathf.RoundToInt((float)Math.Max(0d, stored)))}");
+            // If UI bindings only report zeros, keep searching through deeper fallbacks.
+            return garbageProduction != 0 || garbageProcessingCapacity != 0 || garbageProcessed != 0;
+        }
+
+        private static bool TryReadGarbageStatsFromEcs(World world, out int garbageProduction, out int garbageProcessingCapacity, out int garbageProcessed)
+        {
+            garbageProduction = 0;
+            garbageProcessingCapacity = 0;
+            garbageProcessed = 0;
+            if (world == null)
+                return false;
+
+            var entityManager = world.EntityManager;
+            var foundAny = false;
+            long accumulatedGarbage = 0;
+            long facilityProcessingRate = 0;
+
+            var accumulationSystem = world.GetExistingSystemManaged<GarbageAccumulationSystem>();
+            if (accumulationSystem != null)
+            {
+                accumulatedGarbage = Math.Max(0, accumulationSystem.garbageAccumulation);
+                foundAny = true;
+            }
+
+            // Reliable fallback for "treated/incinerated" amount from facility components.
+            var facilityQuery = entityManager.CreateEntityQuery(ComponentType.ReadOnly<GarbageFacility>());
+            if (!facilityQuery.IsEmptyIgnoreFilter)
+            {
+                var entities = facilityQuery.ToEntityArray(Unity.Collections.Allocator.Temp);
+                try
+                {
+                    for (var i = 0; i < entities.Length; i++)
+                    {
+                        var facility = entityManager.GetComponentData<GarbageFacility>(entities[i]);
+                        facilityProcessingRate += Math.Max(0, facility.m_ProcessingRate);
+                    }
+                }
+                finally
+                {
+                    entities.Dispose();
+                }
+
+                foundAny = true;
+            }
+
+            var garbageAiType = ResolveFirstType("Game.Simulation.GarbageFacilityAISystem");
+            if (garbageAiType != null && TryGetExistingSystemManaged(world, garbageAiType, out var garbageAiSystem) && garbageAiSystem != null)
+            {
+                foundAny = true;
+                _ = TryReadIntMember(garbageAiSystem, out garbageProduction,
+                    "m_GarbageRate", "garbageRate", "m_GarbageProduction", "garbageProduction");
+                _ = TryReadIntMember(garbageAiSystem, out garbageProcessed,
+                    "m_ProcessingRate", "processingRate",
+                    "m_IncinerationRate", "incinerationRate",
+                    "m_IncineratedGarbage", "incineratedGarbage", "incinerated",
+                    "m_GarbageProcessed", "garbageProcessed");
+                _ = TryReadIntMember(garbageAiSystem, out garbageProcessingCapacity,
+                    "m_Capacity", "capacity", "m_ProcessingCapacity", "processingCapacity", "m_StoredGarbage", "storedGarbage");
+            }
+
+            if (!foundAny)
+                return false;
+
+            if (garbageProduction <= 0)
+                garbageProduction = (int)Math.Min(int.MaxValue, Math.Max(0, accumulatedGarbage));
+
+            if (garbageProcessed <= 0 && facilityProcessingRate > 0)
+                garbageProcessed = (int)Math.Min(int.MaxValue, facilityProcessingRate);
+
+            if (garbageProcessingCapacity <= 0 && facilityProcessingRate > 0)
+                garbageProcessingCapacity = (int)Math.Min(int.MaxValue, facilityProcessingRate);
+
+            if (garbageProcessed <= 0 && garbageProduction > 0 && garbageProcessingCapacity > 0)
+                garbageProcessed = Math.Min(garbageProduction, garbageProcessingCapacity);
+
+            MaybeLogGarbageDiscovery(
+                $"ECS garbage fallback: production={garbageProduction} capacity={garbageProcessingCapacity} processed={garbageProcessed} accum={Math.Min(int.MaxValue, Math.Max(0, accumulatedGarbage))} facilityRate={Math.Min(int.MaxValue, Math.Max(0, facilityProcessingRate))}");
+
+            // Keep cache alive even when values are currently zero.
+            return true;
+        }
+
+        private static bool TryReadGetterBindingNumeric(object owner, string fieldName, out double value)
+        {
+            value = 0d;
+            if (owner == null || string.IsNullOrWhiteSpace(fieldName))
+                return false;
+
+            var flags = AnyInstance;
+            object binding = null;
+            try
+            {
+                var field = owner.GetType().GetField(fieldName, flags);
+                if (field == null)
+                    return false;
+                binding = field.GetValue(owner);
+            }
+            catch
+            {
+                return false;
+            }
+
+            if (binding == null)
+                return false;
+
+            if (TryReadNumericFromObject(binding, out value))
+                return true;
+
+            if (TryReadMember(binding, out var rawValue, "m_Value", "value") &&
+                TryConvertToDouble(rawValue, out value))
+                return true;
+
+            if (TryReadMember(binding, out var getter, "m_Getter") && getter is Delegate del)
+            {
+                try
+                {
+                    var invoked = del.DynamicInvoke();
+                    if (TryConvertToDouble(invoked, out value))
+                        return true;
+                }
+                catch
+                {
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryReadNumericFromObject(object target, out double value)
+        {
+            value = 0d;
+            if (target == null)
+                return false;
+
+            if (TryConvertToDouble(target, out value))
+                return true;
+
+            if (TryReadMember(target, out var v, "value", "Value", "m_Value", "m_value", "amount", "Amount") &&
+                TryConvertToDouble(v, out value))
+                return true;
+
+            return false;
+        }
+
+        private static bool TryConvertToDouble(object raw, out double value)
+        {
+            value = 0d;
+            switch (raw)
+            {
+                case null:
+                    return false;
+                case int i:
+                    value = i;
+                    return true;
+                case long l:
+                    value = l;
+                    return true;
+                case short s:
+                    value = s;
+                    return true;
+                case byte b:
+                    value = b;
+                    return true;
+                case float f:
+                    value = f;
+                    return true;
+                case double d:
+                    value = d;
+                    return true;
+                case decimal m:
+                    value = (double)m;
+                    return true;
+            }
+
+            var text = raw.ToString();
+            return !string.IsNullOrWhiteSpace(text) &&
+                   double.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out value);
+        }
+
+        private static bool TryReadGarbageValuesFromSystem(object system, out int garbageProduction, out int garbageProcessingCapacity, out int garbageProcessed)
+        {
+            garbageProduction = 0;
+            garbageProcessingCapacity = 0;
+            garbageProcessed = 0;
+            if (system == null)
+                return false;
+
+            var foundAny = false;
+            foundAny |= TryReadIntMember(system, out garbageProduction,
+                "garbageProduction",
+                "wasteProduction",
+                "totalGarbageProduction",
+                "totalWasteProduction",
+                "collectedGarbage",
+                "production",
+                "m_GarbageProduction",
+                "m_WasteProduction",
+                "m_TotalGarbageProduction",
+                "m_TotalWasteProduction",
+                "m_Production");
+            foundAny |= TryReadIntMember(system, out garbageProcessingCapacity,
+                "garbageProcessingCapacity",
+                "wasteProcessingCapacity",
+                "totalGarbageProcessingCapacity",
+                "totalWasteProcessingCapacity",
+                "incinerationCapacity",
+                "landfillCapacity",
+                "processingCapacity",
+                "capacity",
+                "m_GarbageProcessingCapacity",
+                "m_WasteProcessingCapacity",
+                "m_TotalGarbageProcessingCapacity",
+                "m_TotalWasteProcessingCapacity",
+                "m_IncinerationCapacity",
+                "m_LandfillCapacity",
+                "m_ProcessingCapacity",
+                "m_Capacity");
+            foundAny |= TryReadIntMember(system, out garbageProcessed,
+                "garbageProcessed",
+                "wasteProcessed",
+                "totalGarbageProcessed",
+                "totalWasteProcessed",
+                "incineratedGarbage",
+                "incineratedWaste",
+                "totalIncineratedGarbage",
+                "incinerationRate",
+                "incinerated",
+                "collected",
+                "handled",
+                "processed",
+                "fulfilledConsumption",
+                "m_GarbageProcessed",
+                "m_WasteProcessed",
+                "m_TotalGarbageProcessed",
+                "m_TotalWasteProcessed",
+                "m_IncineratedGarbage",
+                "m_IncineratedWaste",
+                "m_TotalIncineratedGarbage",
+                "m_IncinerationRate",
+                "m_Incinerated",
+                "m_Collected",
+                "m_Handled",
+                "m_Processed",
+                "m_FulfilledConsumption");
+
+            return foundAny;
+        }
+
+        private static bool TryReadGarbageStatsFromSimulationScan(World world, out int garbageProduction, out int garbageProcessingCapacity, out int garbageProcessed)
+        {
+            garbageProduction = 0;
+            garbageProcessingCapacity = 0;
+            garbageProcessed = 0;
+            if (world == null)
+                return false;
+
+            var bestScore = int.MinValue;
+            var foundAny = false;
+            Type bestType = null;
+            string bestProductionMember = null;
+            string bestCapacityMember = null;
+            string bestProcessedMember = null;
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (var i = 0; i < assemblies.Length; i++)
+            {
+                Type[] types;
+                try
+                {
+                    types = assemblies[i].GetTypes();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                for (var j = 0; j < types.Length; j++)
+                {
+                    var type = types[j];
+                    if (type == null)
+                        continue;
+
+                    var ns = type.Namespace ?? string.Empty;
+                    if (!ns.StartsWith("Game.Simulation", StringComparison.Ordinal))
+                        continue;
+
+                    var lowerName = (type.FullName ?? string.Empty).ToLowerInvariant();
+                    if (!(lowerName.Contains("garbage") || lowerName.Contains("waste") || lowerName.Contains("landfill") || lowerName.Contains("inciner")))
+                        continue;
+
+                    if (!TryGetExistingSystemManaged(world, type, out var system))
+                        continue;
+
+                    var discoveredProduction = string.Empty;
+                    var discoveredCapacity = string.Empty;
+                    var discoveredProcessed = string.Empty;
+                    var candidateFound = TryReadGarbageValuesFromSystem(system, out var production, out var capacity, out var processed);
+                    if (!candidateFound &&
+                        !TryDiscoverGarbageMemberNames(system, out discoveredProduction, out discoveredCapacity, out discoveredProcessed))
+                    {
+                        continue;
+                    }
+
+                    if (!candidateFound)
+                    {
+                        candidateFound |= TryReadIntMember(system, out production, discoveredProduction);
+                        candidateFound |= TryReadIntMember(system, out capacity, discoveredCapacity);
+                        candidateFound |= TryReadIntMember(system, out processed, discoveredProcessed);
+                    }
+
+                    if (!candidateFound)
+                        continue;
+
+                    var score = Math.Abs(production) + Math.Abs(capacity) + Math.Abs(processed);
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        garbageProduction = production;
+                        garbageProcessingCapacity = capacity;
+                        garbageProcessed = processed;
+                        foundAny = true;
+                        bestType = type;
+                        TryDiscoverGarbageMemberNames(system, out bestProductionMember, out bestCapacityMember, out bestProcessedMember);
+                    }
+                }
+            }
+
+            if (!foundAny)
+                return false;
+
+            CachedGarbageSystemType = bestType;
+            if (!string.IsNullOrWhiteSpace(bestProductionMember))
+                CachedGarbageProductionMember = bestProductionMember;
+            if (!string.IsNullOrWhiteSpace(bestCapacityMember))
+                CachedGarbageCapacityMember = bestCapacityMember;
+            if (!string.IsNullOrWhiteSpace(bestProcessedMember))
+                CachedGarbageProcessedMember = bestProcessedMember;
+
+            garbageProduction = Math.Max(0, garbageProduction);
+            garbageProcessingCapacity = Math.Max(0, garbageProcessingCapacity);
+            garbageProcessed = Math.Max(0, garbageProcessed);
+            MaybeLogGarbageDiscovery($"Fallback scan selected {bestType?.FullName ?? "<unknown>"} with prod={garbageProduction} cap={garbageProcessingCapacity} processed={garbageProcessed}");
+            return true;
+        }
+
+        private static Type ResolveFirstType(params string[] typeNames)
+        {
+            if (typeNames == null || typeNames.Length == 0)
+                return null;
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (var i = 0; i < assemblies.Length; i++)
+            {
+                var assembly = assemblies[i];
+                try
+                {
+                    for (var j = 0; j < typeNames.Length; j++)
+                    {
+                        var type = assembly.GetType(typeNames[j]);
+                        if (type != null)
+                            return type;
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            return null;
+        }
+
+        private static bool TryGetExistingSystemManaged(World world, Type type, out object system)
+        {
+            system = null;
+            if (world == null || type == null)
+                return false;
+
+            try
+            {
+                var getter = typeof(World).GetMethod("GetExistingSystemManaged", AnyInstance, null, new[] { typeof(Type) }, null);
+                if (getter == null)
+                    return false;
+
+                system = getter.Invoke(world, new object[] { type });
+                return system != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool TryDiscoverGarbageSystem(World world, out Type discoveredType, out object discoveredSystem)
+        {
+            discoveredType = null;
+            discoveredSystem = null;
+            if (world == null)
+                return false;
+
+            var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+            for (var i = 0; i < assemblies.Length; i++)
+            {
+                var assembly = assemblies[i];
+                Type[] types;
+                try
+                {
+                    types = assembly.GetTypes();
+                }
+                catch
+                {
+                    continue;
+                }
+
+                for (var j = 0; j < types.Length; j++)
+                {
+                    var type = types[j];
+                    if (type == null)
+                        continue;
+
+                    var fullName = type.FullName ?? string.Empty;
+                    var ns = type.Namespace ?? string.Empty;
+                    if (!ns.StartsWith("Game.Simulation", StringComparison.Ordinal))
+                        continue;
+
+                    var lower = fullName.ToLowerInvariant();
+                    if (!(lower.Contains("garbage") || lower.Contains("waste")))
+                        continue;
+
+                    if (!TryGetExistingSystemManaged(world, type, out var system))
+                        continue;
+
+                    discoveredType = type;
+                    discoveredSystem = system;
+                    MaybeLogGarbageDiscovery($"Discovered garbage system type: {fullName}");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryDiscoverGarbageMemberNames(object target, out string productionMember, out string capacityMember, out string processedMember)
+        {
+            productionMember = null;
+            capacityMember = null;
+            processedMember = null;
+            if (target == null)
+                return false;
+
+            var type = target.GetType();
+            var members = new System.Collections.Generic.List<string>();
+            var flags = AnyInstance;
+
+            try
+            {
+                var properties = type.GetProperties(flags);
+                for (var i = 0; i < properties.Length; i++)
+                {
+                    var p = properties[i];
+                    if (p == null || p.GetIndexParameters().Length != 0)
+                        continue;
+                    var t = p.PropertyType;
+                    if (t == typeof(int) || t == typeof(long) || t == typeof(float) || t == typeof(double) || t == typeof(decimal) || t == typeof(short) || t == typeof(byte))
+                    {
+                        members.Add(p.Name);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                var fields = type.GetFields(flags);
+                for (var i = 0; i < fields.Length; i++)
+                {
+                    var f = fields[i];
+                    var t = f.FieldType;
+                    if (t == typeof(int) || t == typeof(long) || t == typeof(float) || t == typeof(double) || t == typeof(decimal) || t == typeof(short) || t == typeof(byte))
+                    {
+                        members.Add(f.Name);
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            var typeName = (type.FullName ?? string.Empty).ToLowerInvariant();
+            var typeLooksGarbage = typeName.Contains("garbage") || typeName.Contains("waste") || typeName.Contains("landfill") || typeName.Contains("inciner");
+            for (var i = 0; i < members.Count; i++)
+            {
+                var name = members[i];
+                var n = name.ToLowerInvariant();
+                var hasWasteWord = n.Contains("garbage") || n.Contains("waste");
+                var hasProductionWord = n.Contains("prod") || n.Contains("generate");
+                var hasCapacityWord = n.Contains("cap") || n.Contains("process") || n.Contains("throughput") || n.Contains("limit");
+                var hasProcessedWord = n.Contains("processed") || n.Contains("fulfilled") || n.Contains("handled") || n.Contains("collected") || n.Contains("inciner");
+                var isEligible = hasWasteWord || typeLooksGarbage;
+                if (!isEligible)
+                    continue;
+
+                if (productionMember == null && hasProductionWord)
+                    productionMember = name;
+                if (capacityMember == null && hasCapacityWord)
+                    capacityMember = name;
+                if (processedMember == null && hasProcessedWord)
+                    processedMember = name;
+            }
+
+            return productionMember != null || capacityMember != null || processedMember != null;
+        }
+
+        private static void MaybeLogGarbageDiscovery(string message)
+        {
+            var now = DateTime.UtcNow;
+            if ((now - LastGarbageDiscoveryLogUtc).TotalSeconds < 15)
+                return;
+            LastGarbageDiscoveryLogUtc = now;
+            ModDiagnostics.Write($"Garbage stats discovery: {message}");
+        }
+
+        private static void MaybeLogGarbageDeepScan(World world)
+        {
+            if (world == null)
+                return;
+
+            var now = DateTime.UtcNow;
+            if (now < NextGarbageDeepDumpUtc)
+                return;
+            NextGarbageDeepDumpUtc = now.AddSeconds(20);
+
+            try
+            {
+                var systemsLogged = 0;
+                var assemblies = AppDomain.CurrentDomain.GetAssemblies();
+                for (var i = 0; i < assemblies.Length; i++)
+                {
+                    Type[] types;
+                    try
+                    {
+                        types = assemblies[i].GetTypes();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    for (var j = 0; j < types.Length; j++)
+                    {
+                        var type = types[j];
+                        if (type == null)
+                            continue;
+
+                        var ns = type.Namespace ?? string.Empty;
+                        if (!ns.StartsWith("Game.Simulation", StringComparison.Ordinal))
+                            continue;
+
+                        var lowerType = (type.FullName ?? string.Empty).ToLowerInvariant();
+                        if (!(lowerType.Contains("garbage") || lowerType.Contains("waste") || lowerType.Contains("inciner") || lowerType.Contains("landfill")))
+                            continue;
+
+                        if (!TryGetExistingSystemManaged(world, type, out var system) || system == null)
+                            continue;
+
+                        var sb = new StringBuilder(512);
+                        sb.Append("Garbage deep scan ").Append(type.FullName).Append(": ");
+                        var members = type.GetMembers(AnyInstance)
+                            .Where(m => m.MemberType == MemberTypes.Field || m.MemberType == MemberTypes.Property)
+                            .Select(m => m.Name)
+                            .Distinct(StringComparer.Ordinal)
+                            .Where(name =>
+                            {
+                                var n = name.ToLowerInvariant();
+                                return n.Contains("garbage") || n.Contains("waste") || n.Contains("inciner") || n.Contains("landfill") ||
+                                       n.Contains("process") || n.Contains("capacity") || n.Contains("rate") || n.Contains("stored") ||
+                                       n.Contains("accum") || n.Contains("collec") || n.Contains("handled");
+                            })
+                            .Take(40)
+                            .ToList();
+
+                        var foundAny = false;
+                        for (var k = 0; k < members.Count; k++)
+                        {
+                            if (!TryReadMember(system, out var raw, members[k]))
+                                continue;
+                            if (!TryConvertToDouble(raw, out var numeric))
+                                continue;
+
+                            if (foundAny)
+                                sb.Append(" | ");
+
+                            sb.Append(members[k]).Append('=').Append(numeric.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture));
+                            foundAny = true;
+                        }
+
+                        if (!foundAny)
+                        {
+                            sb.Append("<no numeric members readable>");
+                        }
+
+                        ModDiagnostics.Write(sb.ToString());
+                        systemsLogged++;
+                        if (systemsLogged >= 6)
+                            return;
+                    }
+                }
+
+                if (systemsLogged == 0)
+                {
+                    ModDiagnostics.Write("Garbage deep scan: no matching simulation system found.");
+                }
+            }
+            catch (Exception e)
+            {
+                ModDiagnostics.Write($"Garbage deep scan failed: {e.GetType().Name}: {e.Message}");
+            }
+        }
+
+        private static bool TryReadIntMember(object target, out int value, params string[] memberNames)
+        {
+            value = 0;
+            if (!TryReadMember(target, out var raw, memberNames))
+                return false;
+
+            switch (raw)
+            {
+                case int i:
+                    value = i;
+                    return true;
+                case long l:
+                    if (l > int.MaxValue) value = int.MaxValue;
+                    else if (l < int.MinValue) value = int.MinValue;
+                    else value = (int)l;
+                    return true;
+                case float f:
+                    value = Mathf.RoundToInt(f);
+                    return true;
+                case double d:
+                    value = Mathf.RoundToInt((float)d);
+                    return true;
+                case decimal m:
+                    value = Mathf.RoundToInt((float)m);
+                    return true;
+                case short s:
+                    value = s;
+                    return true;
+                case byte b:
+                    value = b;
+                    return true;
+            }
+
+            if (raw != null && int.TryParse(raw.ToString(), out var parsed))
+            {
+                value = parsed;
+                return true;
+            }
+
+            return false;
         }
 
         private static bool TryResolveSimulationDateText(out string text)

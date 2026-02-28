@@ -16,6 +16,9 @@ namespace MultiSkyLineII
         public int SewageCapacity;
         public int SewageConsumption;
         public int SewageFulfilledConsumption;
+        public int GarbageProduction;
+        public int GarbageProcessingCapacity;
+        public int GarbageProcessed;
         public int PingMs;
         public bool HasElectricityOutsideConnection;
         public bool HasWaterOutsideConnection;

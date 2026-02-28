@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text;
 using Colossal.UI.Binding;
 using Game;
@@ -30,6 +31,10 @@ namespace MultiSkyLineII
         private int _uiReadySinceLastLog;
         private int _uiPingSinceLastLog;
         private string _lastUiPingText = "<none>";
+        private DateTime _deferCaptureUntilUtc;
+        private bool _cachedInGameplay;
+        private DateTime _nextGameplayCheckUtc;
+        private long _perfSeq;
 
         public void Initialize(MultiplayerNetworkService networkService)
         {
@@ -50,27 +55,48 @@ namespace MultiSkyLineII
                 RegisterBindings();
             }
 
-            if (DateTime.UtcNow >= _nextLocalStateCaptureUtc)
+            var nowForGameplay = DateTime.UtcNow;
+            if (nowForGameplay >= _nextGameplayCheckUtc)
             {
-                _networkService.CaptureLocalStateOnMainThread();
-                _nextLocalStateCaptureUtc = DateTime.UtcNow.AddMilliseconds(400);
+                _cachedInGameplay = MultiplayerResourceReader.HasActiveCity();
+                _nextGameplayCheckUtc = nowForGameplay.AddMilliseconds(250);
             }
 
-            var inGameplay = MultiplayerResourceReader.HasActiveCity();
+            var inGameplay = _cachedInGameplay;
+            var toggledThisFrame = false;
             if (!inGameplay && _visible)
             {
-                SetVisible(false);
+                SetVisible(false, inGameplay);
+                toggledThisFrame = true;
             }
             else if (inGameplay && Input.GetKeyDown(KeyCode.F8))
             {
-                ModDiagnostics.Write($"NativeUiBridge F8 pressed. Visible before toggle={_visible}");
-                SetVisible(!_visible);
+                ModDiagnostics.Write($"NativeUiBridge F8 detected (inGameplay=1, currentVisible={_visible})");
+                SetVisible(!_visible, inGameplay);
+                toggledThisFrame = true;
+            }
+
+            if (!toggledThisFrame && DateTime.UtcNow >= _nextLocalStateCaptureUtc)
+            {
+                var now = DateTime.UtcNow;
+                if (now < _deferCaptureUntilUtc)
+                {
+                    _nextLocalStateCaptureUtc = _deferCaptureUntilUtc;
+                }
+                else
+                {
+                    var captureSw = Stopwatch.StartNew();
+                    _networkService.CaptureLocalStateOnMainThread();
+                    captureSw.Stop();
+                    LogPerf("CaptureLocalStateOnMainThread", captureSw.ElapsedMilliseconds, _visible ? "visible=1" : "visible=0", 10);
+                    _nextLocalStateCaptureUtc = now.AddMilliseconds(_visible ? 900 : 2200);
+                }
             }
 
             if (DateTime.UtcNow >= _nextPayloadRefreshUtc)
             {
                 PublishSnapshot(force: false);
-                _nextPayloadRefreshUtc = DateTime.UtcNow.AddMilliseconds(300);
+                _nextPayloadRefreshUtc = DateTime.UtcNow.AddMilliseconds(_visible ? 650 : 1400);
             }
 
             if (!_uiHandshakeReceived && !_uiHandshakeTimeoutLogged && DateTime.UtcNow >= _uiHandshakeDeadlineUtc)
@@ -127,21 +153,48 @@ namespace MultiSkyLineII
 
         private void ToggleVisible()
         {
-            SetVisible(!_visible);
+            ModDiagnostics.Write($"NativeUiBridge ToggleVisible requested (cachedInGameplay={_cachedInGameplay}, currentVisible={_visible})");
+            SetVisible(!_visible, _cachedInGameplay);
         }
 
         private void SetVisible(bool visible)
         {
-            var inGameplay = MultiplayerResourceReader.HasActiveCity();
+            SetVisible(visible, MultiplayerResourceReader.HasActiveCity());
+        }
+
+        private void SetVisible(bool visible, bool inGameplay)
+        {
+            var setVisibleSw = Stopwatch.StartNew();
+            ModDiagnostics.Write($"NativeUiBridge SetVisible request visible={visible} inGameplay={inGameplay} current={_visible}");
             var next = visible && inGameplay;
             if (_visible == next)
+            {
+                ModDiagnostics.Write("NativeUiBridge SetVisible noop (state unchanged).");
                 return;
+            }
 
             _visible = next;
-            ModDiagnostics.Info($"[NativeHUD] SetVisible -> {_visible} (inGameplay={inGameplay})");
-            ModDiagnostics.Write($"NativeUiBridge.SetVisible({_visible}) inGameplay={inGameplay}");
+            var bindingSw = Stopwatch.StartNew();
             _visibleBinding?.Update(_visible);
-            PublishSnapshot(force: true);
+            bindingSw.Stop();
+            LogPerf("visibleBinding.Update", bindingSw.ElapsedMilliseconds, _visible ? "to=1" : "to=0", 5);
+            if (_visible)
+            {
+                // Open instantly, then do heavy world sampling shortly after.
+                _deferCaptureUntilUtc = DateTime.UtcNow.AddMilliseconds(800);
+                _nextPayloadRefreshUtc = DateTime.UtcNow.AddMilliseconds(650);
+                _nextLocalStateCaptureUtc = _deferCaptureUntilUtc;
+            }
+
+            // When opening, skip immediate payload build to keep the toggle frame smooth.
+            if (!_visible)
+            {
+                PublishSnapshot(force: false);
+            }
+
+            setVisibleSw.Stop();
+            LogPerf("SetVisible", setVisibleSw.ElapsedMilliseconds, $"inGameplay={(inGameplay ? 1 : 0)} to={(_visible ? 1 : 0)}", 5);
+            ModDiagnostics.Write($"NativeUiBridge SetVisible done -> {_visible} in {setVisibleSw.ElapsedMilliseconds}ms");
         }
 
         private void ProposeContractPacked(string packed)
@@ -260,12 +313,40 @@ namespace MultiSkyLineII
             if (_networkService == null)
                 return;
 
+            var publishSw = Stopwatch.StartNew();
+            var buildSw = Stopwatch.StartNew();
             var payload = BuildSnapshotJson();
+            buildSw.Stop();
+            LogPerf("BuildSnapshotJson", buildSw.ElapsedMilliseconds, force ? "force=1" : "force=0", 8);
             if (!force && string.Equals(payload, _lastPayload, StringComparison.Ordinal))
+            {
+                publishSw.Stop();
+                LogPerf("PublishSnapshot(skip-same)", publishSw.ElapsedMilliseconds, string.Empty, 8);
                 return;
+            }
 
             _lastPayload = payload;
+            var payloadBindingSw = Stopwatch.StartNew();
             _payloadBinding?.Update(payload);
+            payloadBindingSw.Stop();
+            LogPerf("payloadBinding.Update", payloadBindingSw.ElapsedMilliseconds, $"len={payload.Length}", 8);
+            publishSw.Stop();
+            LogPerf("PublishSnapshot(total)", publishSw.ElapsedMilliseconds, force ? "force=1" : "force=0", 8);
+        }
+
+        private void LogPerf(string stage, long elapsedMs, string extra, long thresholdMs)
+        {
+            if (elapsedMs < thresholdMs)
+                return;
+
+            var seq = System.Threading.Interlocked.Increment(ref _perfSeq);
+            if (string.IsNullOrWhiteSpace(extra))
+            {
+                ModDiagnostics.Write($"NativeUiBridge PERF#{seq}: {stage} {elapsedMs}ms");
+                return;
+            }
+
+            ModDiagnostics.Write($"NativeUiBridge PERF#{seq}: {stage} {elapsedMs}ms ({extra})");
         }
 
         private string BuildSnapshotJson()
@@ -330,7 +411,7 @@ namespace MultiSkyLineII
             }
             sb.Append("],");
             sb.Append("\"logs\":[");
-            var start = Math.Max(0, logs.Count - 120);
+            var start = Math.Max(0, logs.Count - 20);
             for (var i = start; i < logs.Count; i++)
             {
                 if (i > start) sb.Append(',');
@@ -346,8 +427,10 @@ namespace MultiSkyLineII
             sb.Append("\"ui\":{");
             AppendProp(sb, "title", L(locale, "ui.title", "MultiSkyLines II")); sb.Append(',');
             AppendProp(sb, "close", L(locale, "ui.close", "Close")); sb.Append(',');
-            AppendProp(sb, "tab_overview", L(locale, "ui.tab_overview", "Overview")); sb.Append(',');
+            AppendProp(sb, "tab_overview", L(locale, "ui.tab_overview", "Players")); sb.Append(',');
             AppendProp(sb, "tab_contracts", L(locale, "ui.tab_contracts", "Contracts")); sb.Append(',');
+            AppendProp(sb, "warning_title", L(locale, "ui.warning_title", "Warning")); sb.Append(',');
+            AppendProp(sb, "contracts_warning", L(locale, "ui.contracts_warning", "Warning: contracts are currently under development and are not functional yet. This is difficult to implement because the game was not designed for this feature.")); sb.Append(',');
             AppendProp(sb, "tab_debug", L(locale, "ui.tab_debug", "Debug")); sb.Append(',');
             AppendProp(sb, "session", L(locale, "ui.session", "Session")); sb.Append(',');
             AppendProp(sb, "local", L(locale, "ui.local", "Local")); sb.Append(',');
@@ -365,9 +448,13 @@ namespace MultiSkyLineII
             AppendProp(sb, "clear_logs", L(locale, "ui.clear_logs", "Clear logs")); sb.Append(',');
             AppendProp(sb, "ping_bridge", L(locale, "ui.ping_bridge", "Ping bridge")); sb.Append(',');
             AppendProp(sb, "no_network_logs", L(locale, "ui.no_network_logs", "No network logs.")); sb.Append(',');
+            AppendProp(sb, "col_type", L(locale, "ui.col_type", "Type")); sb.Append(',');
+            AppendProp(sb, "col_production", L(locale, "ui.col_production", "Production")); sb.Append(',');
+            AppendProp(sb, "col_surplus", L(locale, "ui.col_surplus", "Excess")); sb.Append(',');
             AppendProp(sb, "resource_electricity", L(locale, "ui.resource_electricity", "Electricity")); sb.Append(',');
             AppendProp(sb, "resource_water", L(locale, "ui.resource_water", "Water")); sb.Append(',');
             AppendProp(sb, "resource_sewage", L(locale, "ui.resource_sewage", "Sewage")); sb.Append(',');
+            AppendProp(sb, "resource_waste", L(locale, "ui.resource_waste", "Waste")); sb.Append(',');
             AppendProp(sb, "resource_unknown", L(locale, "ui.resource_unknown", "Unknown")); sb.Append(',');
             AppendProp(sb, "launcher_open", L(locale, "ui.launcher_open", "MS2 OPEN")); sb.Append(',');
             AppendProp(sb, "launcher_closed", L(locale, "ui.launcher_closed", "MS2"));
@@ -398,6 +485,9 @@ namespace MultiSkyLineII
             AppendProp(sb, "sewCap", s.SewageCapacity); sb.Append(',');
             AppendProp(sb, "sewCons", s.SewageConsumption); sb.Append(',');
             AppendProp(sb, "sewServed", s.SewageFulfilledConsumption); sb.Append(',');
+            AppendProp(sb, "garbageProd", s.GarbageProduction); sb.Append(',');
+            AppendProp(sb, "garbageProcCap", s.GarbageProcessingCapacity); sb.Append(',');
+            AppendProp(sb, "garbageProcessed", s.GarbageProcessed); sb.Append(',');
             sb.Append("\"borderElec\":").Append(s.HasElectricityOutsideConnection ? "true" : "false").Append(',');
             sb.Append("\"borderWater\":").Append(s.HasWaterOutsideConnection ? "true" : "false").Append(',');
             sb.Append("\"borderSew\":").Append(s.HasSewageOutsideConnection ? "true" : "false");

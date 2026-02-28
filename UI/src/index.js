@@ -1,10 +1,10 @@
 import React from "react";
 import { bindValue, trigger, useValue } from "cs2/api";
 import { Portal } from "cs2/ui";
-
 const GROUP = "multisky";
 const payload$ = bindValue(GROUP, "payload", "{}");
 const visible$ = bindValue(GROUP, "visible", false);
+const EMPTY_DATA = Object.freeze({ ui: {}, states: [], contracts: [], proposals: [], logs: [] });
 
 function tr(ui, key, fallback) {
   const v = ui && ui[key];
@@ -169,8 +169,70 @@ const styles = {
     padding: "10rem 12rem",
     marginBottom: "10rem"
   },
+  warningCard: {
+    background: "rgba(209, 117, 0, 0.18)",
+    border: "1rem solid rgba(235, 154, 45, 0.75)",
+    borderRadius: "10rem",
+    padding: "10rem 12rem",
+    marginBottom: "10rem",
+    color: "#ffe7c6"
+  },
   row: { display: "flex", justifyContent: "space-between", gap: "12rem", fontSize: "12rem", marginBottom: "4rem" },
   muted: { color: "#9eb7d3", fontSize: "11rem" },
+  iconLine: { display: "flex", alignItems: "center", gap: "6rem" },
+  iconChip: {
+    width: "22rem",
+    height: "22rem",
+    borderRadius: "999rem",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "inset 0 0 0 1rem rgba(255,255,255,0.35), 0 2rem 8rem rgba(0,0,0,0.25)"
+  },
+  iconSm: { width: "14rem", height: "14rem", display: "block" },
+  iconElecChip: { background: "rgba(238, 178, 35, 0.95)" },
+  iconWaterChip: { background: "rgba(52, 163, 230, 0.95)" },
+  iconSewageChip: { background: "rgba(137, 89, 57, 0.95)" },
+  iconWasteChip: { background: "rgba(103, 122, 138, 0.95)" },
+  resourceList: { marginTop: "8rem", display: "flex", flexDirection: "column", gap: "6rem" },
+  resourceRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "6rem",
+    border: "1rem solid rgba(126,170,209,0.22)",
+    borderRadius: "9rem",
+    background: "rgba(24,40,58,0.55)",
+    padding: "5rem 8rem"
+  },
+  resourceLeft: { display: "flex", alignItems: "center", gap: "12rem", minWidth: "138rem" },
+  resourceRight: { display: "flex", alignItems: "center", gap: "12rem", marginLeft: "auto" },
+  statBadge: {
+    width: "170rem",
+    flex: "0 0 170rem",
+    borderRadius: "7rem",
+    background: "rgba(66,101,134,0.45)",
+    border: "1rem solid rgba(130,173,210,0.38)",
+    padding: "3rem 5rem",
+    color: "#e1eefb",
+    fontSize: "10rem",
+    fontVariantNumeric: "tabular-nums",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "6rem",
+    textAlign: "left",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis"
+  },
+  statLabel: { color: "#9eb7d3", flex: "0 0 auto" },
+  statValue: { marginLeft: "auto", textAlign: "right", minWidth: 0 },
+  resourceTypeCell: {
+    display: "flex",
+    alignItems: "center",
+    gap: "7rem"
+  },
   btnRow: { display: "flex", gap: "8rem", marginTop: "8rem", flexWrap: "wrap" },
   actionBtn: {
     border: "1rem solid rgba(133,178,217,0.7)",
@@ -188,27 +250,107 @@ function TabButton(props) {
   return React.createElement("button", { type: "button", onClick: props.onClick, style: merged }, props.label);
 }
 
+function iconSvg(path, viewBox = "0 0 24 24") {
+  return React.createElement(
+    "svg",
+    { viewBox, style: styles.iconSm, "aria-hidden": true },
+    React.createElement("path", { d: path, fill: "#0f1a24" })
+  );
+}
+
+const energyGlyph = () => iconSvg("M13.2 2 4 14h6l-1 8L20 10h-6.2L13.2 2z");
+const waterGlyph = () => iconSvg("M12 2c-.3 0-.6.2-.8.5L6.5 9.1A7 7 0 1 0 17.5 9l-4.7-6.5A1 1 0 0 0 12 2z");
+const trashGlyph = () => iconSvg("M9 3h6l1 2h4v2h-1l-1 13a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 7H4V5h4l1-2zm0 5v11h2V8H9zm4 0v11h2V8h-2zM10.2 5h3.6l-.5-1h-2.6l-.5 1z");
+
 function OverviewTab({ data, ui }) {
   const states = Array.isArray(data.states) ? data.states : [];
+  const formatWaste = (v) => `${formatNumber(v || 0, 0)} t/mo`;
+  const wasteProduction = (s) => Number(s.garbageProd || 0);
+  const wasteSurplus = () => "N/A";
+  const metricBadge = (label, value, extraStyle) =>
+    React.createElement(
+      "div",
+      { style: { ...styles.statBadge, ...(extraStyle || null) } },
+      React.createElement("span", { style: styles.statLabel }, `${label}`),
+      React.createElement("span", { style: styles.statValue }, value)
+    );
   return React.createElement(
     React.Fragment,
     null,
-    React.createElement(
-      "div",
-      { style: styles.card },
-      React.createElement("div", { style: styles.row }, React.createElement("strong", null, tr(ui, "session", "Session")), React.createElement("span", { style: styles.muted }, `v${data.version || "?"}`)),
-      React.createElement("div", { style: styles.row }, React.createElement("span", null, `Mode: ${data.mode || "?"}`), React.createElement("span", { style: styles.muted }, data.destination || "?")),
-      React.createElement("div", { style: styles.muted }, `${tr(ui, "local", "Local")}: ${data.localName || "Unknown"}`)
-    ),
     states.map((s, i) =>
       React.createElement(
         "div",
         { key: `st-${i}`, style: styles.card },
         React.createElement("div", { style: styles.row }, React.createElement("strong", null, s.name || "Unknown"), React.createElement("span", { style: styles.muted }, `Ping ${s.pingMs != null ? s.pingMs : "n/a"} ms`)),
         React.createElement("div", { style: styles.row }, React.createElement("span", null, `Population ${formatNumber(s.population || 0)}`), React.createElement("span", null, formatMoney(s.money || 0))),
-        React.createElement("div", { style: styles.muted }, `Elec: ${rate(0, s.elecServed || 0)} / demande ${rate(0, s.elecCons || 0)}`),
-        React.createElement("div", { style: styles.muted }, `Eau: ${rate(1, s.waterServed || 0)} / demande ${rate(1, s.waterCons || 0)}`),
-        React.createElement("div", { style: styles.muted }, `Eaux usees: ${rate(2, s.sewServed || 0)} / demande ${rate(2, s.sewCons || 0)}`)
+        React.createElement(
+          "div",
+          { style: styles.resourceList },
+          React.createElement(
+            "div",
+            { style: styles.resourceRow },
+            React.createElement(
+              "div",
+              { style: styles.resourceLeft },
+                React.createElement("span", { style: { ...styles.iconChip, ...styles.iconElecChip, marginRight: "8rem" } }, energyGlyph()),
+                React.createElement("span", { style: { marginLeft: "4rem" } }, tr(ui, "resource_electricity", "Electricity"))
+            ),
+            React.createElement(
+              "div",
+              { style: styles.resourceRight },
+              metricBadge(tr(ui, "col_production", "Production"), rate(0, s.elecProd || 0)),
+              metricBadge(tr(ui, "col_surplus", "Surplus"), rate(0, (s.elecProd || 0) - (s.elecCons || 0)), { marginLeft: "12rem" })
+            )
+          ),
+          React.createElement(
+            "div",
+            { style: styles.resourceRow },
+            React.createElement(
+              "div",
+              { style: styles.resourceLeft },
+                React.createElement("span", { style: { ...styles.iconChip, ...styles.iconWaterChip, marginRight: "8rem" } }, waterGlyph()),
+                React.createElement("span", { style: { marginLeft: "4rem" } }, tr(ui, "resource_water", "Water"))
+            ),
+            React.createElement(
+              "div",
+              { style: styles.resourceRight },
+              metricBadge(tr(ui, "col_production", "Production"), rate(1, s.waterCap || 0)),
+              metricBadge(tr(ui, "col_surplus", "Surplus"), rate(1, (s.waterCap || 0) - (s.waterCons || 0)), { marginLeft: "12rem" })
+            )
+          ),
+          React.createElement(
+            "div",
+            { style: styles.resourceRow },
+            React.createElement(
+              "div",
+              { style: styles.resourceLeft },
+                React.createElement("span", { style: { ...styles.iconChip, ...styles.iconSewageChip, marginRight: "8rem" } }, waterGlyph()),
+                React.createElement("span", { style: { marginLeft: "4rem" } }, tr(ui, "resource_sewage", "Sewage"))
+            ),
+            React.createElement(
+              "div",
+              { style: styles.resourceRight },
+              metricBadge(tr(ui, "col_production", "Production"), rate(2, s.sewCap || 0)),
+              metricBadge(tr(ui, "col_surplus", "Surplus"), rate(2, (s.sewCap || 0) - (s.sewCons || 0)), { marginLeft: "12rem" })
+            )
+          ),
+          React.createElement(
+            "div",
+            { style: styles.resourceRow },
+            React.createElement(
+              "div",
+              { style: styles.resourceLeft },
+                React.createElement("span", { style: { ...styles.iconChip, ...styles.iconWasteChip, marginRight: "8rem" } }, trashGlyph()),
+                React.createElement("span", { style: { marginLeft: "4rem" } }, tr(ui, "resource_waste", "Waste"))
+            ),
+            React.createElement(
+              "div",
+              { style: styles.resourceRight },
+              metricBadge(tr(ui, "col_production", "Production"), formatWaste(wasteProduction(s))),
+              metricBadge(tr(ui, "col_surplus", "Surplus"), formatWaste(wasteSurplus(s)), { marginLeft: "12rem" })
+            )
+          )
+        )
       )
     )
   );
@@ -258,6 +400,12 @@ function ContractsTab({ data, ui }) {
   return React.createElement(
     React.Fragment,
     null,
+    React.createElement(
+      "div",
+      { style: styles.warningCard },
+      React.createElement("strong", null, tr(ui, "warning_title", "Warning")),
+      React.createElement("div", { style: { marginTop: "4rem", fontSize: "11rem", lineHeight: 1.35 } }, tr(ui, "contracts_warning", "Warning: contracts are currently under development and are not functional yet. This is difficult to implement because the game was not designed for this feature."))
+    ),
     React.createElement(
       "div",
       { style: styles.card },
@@ -388,6 +536,9 @@ function DebugTab({ data, ui }) {
     React.createElement(
       "div",
       { style: styles.card },
+      React.createElement("div", { style: styles.row }, React.createElement("strong", null, tr(ui, "session", "Session")), React.createElement("span", { style: styles.muted }, `v${data.version || "?"}`)),
+      React.createElement("div", { style: styles.row }, React.createElement("span", null, `Mode: ${data.mode || "?"}`), React.createElement("span", { style: styles.muted }, data.destination || "?")),
+      React.createElement("div", { style: { ...styles.muted, marginBottom: "8rem" } }, `${tr(ui, "local", "Local")}: ${data.localName || "Unknown"}`),
       React.createElement("div", { style: styles.row }, React.createElement("strong", null, "Debug"), React.createElement("span", { style: styles.muted }, `${logs.length} lignes`)),
       React.createElement("div", { style: styles.muted }, `contractsEnabled=${contractsFlag}`),
       message ? React.createElement("div", { style: { ...styles.muted, marginBottom: "8rem", color: "#ffe3a8" } }, message) : null,
@@ -412,17 +563,13 @@ function MultiplayerPanel() {
   const visible = useValue(visible$);
   const payloadText = useValue(payload$);
   const [tab, setTab] = React.useState("overview");
-  const data = React.useMemo(() => safeParsePayload(payloadText), [payloadText]);
+  const data = React.useMemo(() => (visible ? safeParsePayload(payloadText) : EMPTY_DATA), [visible, payloadText]);
   const ui = data.ui || {};
 
   React.useEffect(() => {
     safeTrigger("uiReady");
     safeTrigger("uiPing", "native ui mounted");
   }, []);
-
-  if (!visible) {
-    return null;
-  }
 
   let content = React.createElement(OverviewTab, { data, ui });
   if (tab === "contracts") content = React.createElement(ContractsTab, { data, ui });
@@ -433,7 +580,14 @@ function MultiplayerPanel() {
     null,
     React.createElement(
       "div",
-      { style: styles.shell },
+      {
+        style: {
+          ...styles.shell,
+          opacity: visible ? 1 : 0,
+          visibility: visible ? "visible" : "hidden",
+          pointerEvents: visible ? "auto" : "none"
+        }
+      },
       React.createElement(
         "div",
         { style: styles.header },
@@ -443,7 +597,7 @@ function MultiplayerPanel() {
       React.createElement(
         "div",
         { style: styles.tabs },
-        React.createElement(TabButton, { label: tr(ui, "tab_overview", "Overview"), active: tab === "overview", onClick: () => setTab("overview") }),
+        React.createElement(TabButton, { label: tr(ui, "tab_overview", "Players"), active: tab === "overview", onClick: () => setTab("overview") }),
         React.createElement(TabButton, { label: tr(ui, "tab_contracts", "Contracts"), active: tab === "contracts", onClick: () => setTab("contracts") }),
         React.createElement(TabButton, { label: tr(ui, "tab_debug", "Debug"), active: tab === "debug", onClick: () => setTab("debug") })
       ),
@@ -454,11 +608,6 @@ function MultiplayerPanel() {
 
 function LauncherButton() {
   const visible = useValue(visible$);
-  const payloadText = useValue(payload$);
-  const data = React.useMemo(() => safeParsePayload(payloadText), [payloadText]);
-  const ui = data.ui || {};
-  const launcherOpen = typeof ui.launcher_open === "string" && ui.launcher_open.length > 0 ? ui.launcher_open : "MS2 OPEN";
-  const launcherClosed = typeof ui.launcher_closed === "string" && ui.launcher_closed.length > 0 ? ui.launcher_closed : "MS2";
   React.useEffect(() => {
     safeTrigger("uiReady");
     safeTrigger("uiPing", "launcher mounted");
@@ -472,7 +621,7 @@ function LauncherButton() {
       {
         style: {
           position: "absolute",
-          top: "18rem",
+          top: "68rem",
           right: "18rem",
           pointerEvents: "auto",
           zIndex: 50
@@ -496,7 +645,7 @@ function LauncherButton() {
             boxShadow: "0 6rem 16rem rgba(0,0,0,0.35)"
           }
         },
-        visible ? launcherOpen : launcherClosed
+        "MS2"
       )
     )
   );

@@ -12,6 +12,8 @@ namespace MultiSkyLineII
 {
     public class Mod : IMod
     {
+        private const string ModFolderName = "MultiSkyLinesII";
+        private const string LegacyModFolderName = "MultiSkyLineII";
         public static string DisplayVersion { get; private set; } = "1.0.0";
         public static string CurrentLocale { get; private set; } = "en-US";
 
@@ -82,10 +84,11 @@ namespace MultiSkyLineII
             try
             {
                 var modsRoot = Path.Combine(Application.persistentDataPath, "Mods");
-                var deployedDir = Path.Combine(modsRoot, "MultiSkyLineII");
-                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "MultiSkyLineII.mjs")} exists={File.Exists(Path.Combine(deployedDir, "MultiSkyLineII.mjs"))}");
+                var deployedDir = Path.Combine(modsRoot, ModFolderName);
+                var legacyDir = Path.Combine(modsRoot, LegacyModFolderName);
+                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "MultiSkyLinesII.mjs")} exists={File.Exists(Path.Combine(deployedDir, "MultiSkyLinesII.mjs"))}");
                 ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "mod.json")} exists={File.Exists(Path.Combine(deployedDir, "mod.json"))}");
-                ModDiagnostics.Write($"UI file check: {Path.Combine(deployedDir, "package.json")} exists={File.Exists(Path.Combine(deployedDir, "package.json"))}");
+                ModDiagnostics.Write($"UI file check (legacy): {Path.Combine(legacyDir, "MultiSkyLineII.mjs")} exists={File.Exists(Path.Combine(legacyDir, "MultiSkyLineII.mjs"))}");
             }
             catch (Exception e)
             {
@@ -208,8 +211,12 @@ namespace MultiSkyLineII
                     }
                 }
 
-                var localLowModsFile = Path.Combine(Application.persistentDataPath, "Mods", "MultiSkyLineII", "PublishConfiguration.xml");
+                var localLowModsFile = Path.Combine(Application.persistentDataPath, "Mods", ModFolderName, "PublishConfiguration.xml");
                 if (TryReadModVersionFromFile(localLowModsFile, out var deployedVersion))
+                    return deployedVersion;
+
+                var legacyLocalLowModsFile = Path.Combine(Application.persistentDataPath, "Mods", LegacyModFolderName, "PublishConfiguration.xml");
+                if (TryReadModVersionFromFile(legacyLocalLowModsFile, out deployedVersion))
                     return deployedVersion;
             }
             catch

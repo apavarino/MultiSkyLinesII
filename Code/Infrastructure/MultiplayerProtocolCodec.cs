@@ -47,7 +47,7 @@ namespace MultiSkyLineII
         {
             var encoded = Uri.EscapeDataString(NormalizePlayerName(state.Name));
             var encodedDate = Uri.EscapeDataString(state.SimulationDateText ?? string.Empty);
-            return $"STATE|{encoded}|{state.Money}|{state.Population}|{state.ElectricityProduction}|{state.ElectricityConsumption}|{state.ElectricityFulfilledConsumption}|{state.FreshWaterCapacity}|{state.FreshWaterConsumption}|{state.FreshWaterFulfilledConsumption}|{state.SewageCapacity}|{state.SewageConsumption}|{state.SewageFulfilledConsumption}|{state.PingMs}|{(state.IsPaused ? 1 : 0)}|{state.SimulationSpeed}|{encodedDate}|{(state.HasElectricityOutsideConnection ? 1 : 0)}|{(state.HasWaterOutsideConnection ? 1 : 0)}|{(state.HasSewageOutsideConnection ? 1 : 0)}";
+            return $"STATE|{encoded}|{state.Money}|{state.Population}|{state.ElectricityProduction}|{state.ElectricityConsumption}|{state.ElectricityFulfilledConsumption}|{state.FreshWaterCapacity}|{state.FreshWaterConsumption}|{state.FreshWaterFulfilledConsumption}|{state.SewageCapacity}|{state.SewageConsumption}|{state.SewageFulfilledConsumption}|{state.PingMs}|{(state.IsPaused ? 1 : 0)}|{state.SimulationSpeed}|{encodedDate}|{(state.HasElectricityOutsideConnection ? 1 : 0)}|{(state.HasWaterOutsideConnection ? 1 : 0)}|{(state.HasSewageOutsideConnection ? 1 : 0)}|{state.GarbageProduction}|{state.GarbageProcessingCapacity}|{state.GarbageProcessed}";
         }
 
         public static bool TryParseState(string line, out MultiplayerResourceState state)
@@ -80,6 +80,9 @@ namespace MultiSkyLineII
             var hasElectricityOutside = false;
             var hasWaterOutside = false;
             var hasSewageOutside = false;
+            var garbageProduction = 0;
+            var garbageProcessingCapacity = 0;
+            var garbageProcessed = 0;
             if (parts.Length >= 17)
             {
                 if (int.TryParse(parts[14], out var pausedFlag))
@@ -102,6 +105,13 @@ namespace MultiSkyLineII
                 hasSewageOutside = string.Equals(parts[19], "1", StringComparison.Ordinal);
             }
 
+            if (parts.Length >= 23)
+            {
+                _ = int.TryParse(parts[20], out garbageProduction);
+                _ = int.TryParse(parts[21], out garbageProcessingCapacity);
+                _ = int.TryParse(parts[22], out garbageProcessed);
+            }
+
             state = new MultiplayerResourceState
             {
                 Name = NormalizePlayerName(Uri.UnescapeDataString(parts[1])),
@@ -116,6 +126,9 @@ namespace MultiSkyLineII
                 SewageCapacity = sewageCapacity,
                 SewageConsumption = sewageConsumption,
                 SewageFulfilledConsumption = sewageFulfilledConsumption,
+                GarbageProduction = garbageProduction,
+                GarbageProcessingCapacity = garbageProcessingCapacity,
+                GarbageProcessed = garbageProcessed,
                 PingMs = pingMs,
                 HasElectricityOutsideConnection = hasElectricityOutside,
                 HasWaterOutsideConnection = hasWaterOutside,
@@ -131,7 +144,7 @@ namespace MultiSkyLineII
         public static string SerializeSnapshot(IReadOnlyList<MultiplayerResourceState> states)
         {
             var entries = states
-                .Select(s => $"{Uri.EscapeDataString(s.Name ?? "Unknown")},{s.Money},{s.Population},{s.ElectricityProduction},{s.ElectricityConsumption},{s.ElectricityFulfilledConsumption},{s.FreshWaterCapacity},{s.FreshWaterConsumption},{s.FreshWaterFulfilledConsumption},{s.SewageCapacity},{s.SewageConsumption},{s.SewageFulfilledConsumption},{s.PingMs},{(s.IsPaused ? 1 : 0)},{s.SimulationSpeed},{Uri.EscapeDataString(s.SimulationDateText ?? string.Empty)},{(s.HasElectricityOutsideConnection ? 1 : 0)},{(s.HasWaterOutsideConnection ? 1 : 0)},{(s.HasSewageOutsideConnection ? 1 : 0)}")
+                .Select(s => $"{Uri.EscapeDataString(s.Name ?? "Unknown")},{s.Money},{s.Population},{s.ElectricityProduction},{s.ElectricityConsumption},{s.ElectricityFulfilledConsumption},{s.FreshWaterCapacity},{s.FreshWaterConsumption},{s.FreshWaterFulfilledConsumption},{s.SewageCapacity},{s.SewageConsumption},{s.SewageFulfilledConsumption},{s.PingMs},{(s.IsPaused ? 1 : 0)},{s.SimulationSpeed},{Uri.EscapeDataString(s.SimulationDateText ?? string.Empty)},{(s.HasElectricityOutsideConnection ? 1 : 0)},{(s.HasWaterOutsideConnection ? 1 : 0)},{(s.HasSewageOutsideConnection ? 1 : 0)},{s.GarbageProduction},{s.GarbageProcessingCapacity},{s.GarbageProcessed}")
                 .ToArray();
             return "LIST|" + string.Join("|", entries);
         }
@@ -173,6 +186,9 @@ namespace MultiSkyLineII
                 var hasElectricityOutside = false;
                 var hasWaterOutside = false;
                 var hasSewageOutside = false;
+                var garbageProduction = 0;
+                var garbageProcessingCapacity = 0;
+                var garbageProcessed = 0;
                 if (entry.Length >= 16)
                 {
                     if (int.TryParse(entry[13], out var pausedFlag))
@@ -195,6 +211,13 @@ namespace MultiSkyLineII
                     hasSewageOutside = string.Equals(entry[18], "1", StringComparison.Ordinal);
                 }
 
+                if (entry.Length >= 22)
+                {
+                    _ = int.TryParse(entry[19], out garbageProduction);
+                    _ = int.TryParse(entry[20], out garbageProcessingCapacity);
+                    _ = int.TryParse(entry[21], out garbageProcessed);
+                }
+
                 parsed.Add(new MultiplayerResourceState
                 {
                     Name = NormalizePlayerName(Uri.UnescapeDataString(entry[0])),
@@ -209,6 +232,9 @@ namespace MultiSkyLineII
                     SewageCapacity = sewageCapacity,
                     SewageConsumption = sewageConsumption,
                     SewageFulfilledConsumption = sewageFulfilledConsumption,
+                    GarbageProduction = garbageProduction,
+                    GarbageProcessingCapacity = garbageProcessingCapacity,
+                    GarbageProcessed = garbageProcessed,
                     PingMs = pingMs,
                     HasElectricityOutsideConnection = hasElectricityOutside,
                     HasWaterOutsideConnection = hasWaterOutside,

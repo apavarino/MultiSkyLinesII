@@ -23,6 +23,9 @@ public class MultiplayerProtocolCodecTests
             SewageCapacity = 500,
             SewageConsumption = 250,
             SewageFulfilledConsumption = 240,
+            GarbageProduction = 70,
+            GarbageProcessingCapacity = 90,
+            GarbageProcessed = 65,
             PingMs = 42,
             HasElectricityOutsideConnection = true,
             HasWaterOutsideConnection = false,
@@ -41,6 +44,9 @@ public class MultiplayerProtocolCodecTests
         Assert.Equal(state.Population, parsed.Population);
         Assert.Equal(state.SimulationDateText, parsed.SimulationDateText);
         Assert.Equal(state.HasSewageOutsideConnection, parsed.HasSewageOutsideConnection);
+        Assert.Equal(state.GarbageProduction, parsed.GarbageProduction);
+        Assert.Equal(state.GarbageProcessingCapacity, parsed.GarbageProcessingCapacity);
+        Assert.Equal(state.GarbageProcessed, parsed.GarbageProcessed);
     }
 
     [Fact]
